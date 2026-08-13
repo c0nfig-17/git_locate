@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling / runtime (top-level results dir only — NOT the gitlocate/output package)
+*.log
+/output/
+*.local.yaml
+config.local.yaml
+config.yaml
+
+# Secrets — never commit tokens or provider configs
+.env
+provider-config.yaml
+notify-provider-config.yaml
+
+# OS
+.DS_Store

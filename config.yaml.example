@@ -1,0 +1,131 @@
+# =====================================================================
+# git_locate — example configuration
+# =====================================================================
+# Copy to config.yaml and edit. Anything you omit falls back to the
+# built-in defaults (see gitlocate/config.py::DEFAULTS).
+#
+# SECRETS ARE NEVER STORED HERE. This file only names the environment
+# variables that hold your secrets; the values are read from the env at
+# runtime. Set them before running, e.g.:
+#
+#   export GITHUB_TOKEN=ghp_xxx           # GitHub API token (recommended)
+#   export SERPER_API_KEY=xxx             # optional, enables web dorking
+#   export NOTIFY_PROVIDER_CONFIG=~/.config/notify/provider-config.yaml
+# =====================================================================
+
+github:
+  token_env: GITHUB_TOKEN          # env var holding the GitHub token
+  api_url: https://api.github.com
+  per_page: 100
+  max_pages: 3                     # search pages per query (100 * pages results)
+  enumerate_owner_repos: true      # list repos of confirmed orgs/users
+  owner_repo_min_confidence: 0.4   # only enumerate owners scoring >= this
+  fetch_profiles: true             # pull blog/email to anchor on domains
+  fetch_commit_emails: false       # sample commit emails (slower, stronger)
+  commit_sample: 20
+  discover_orgs: true
+  discover_repos: true
+  discover_users: true
+  search_in:                       # profile fields the Search API looks in
+    orgs: [login, name, email]
+    repos: [name, description]
+    users: [login, name, email]
+
+# --------------------------------------------------------------------
+# Pluggable web-dorking source. OPTIONAL — only runs when the API key
+# named in api_key_env is present in the environment. Without it, the
+# tool works with the GitHub API alone and does not break.
+# --------------------------------------------------------------------
+web_dork:
+  enabled: true
+  provider: serper                 # currently supported: serper
+  api_key_env: SERPER_API_KEY
+  endpoint: https://google.serper.dev/search
+  num: 20
+  queries:
+    - "site:github.com {name}"
+    - 'site:github.com "{name}"'
+    - '"{name}" github organization'
+
+# --------------------------------------------------------------------
+# Name -> search-variant generation.
+# --------------------------------------------------------------------
+variants:
+  separators: ["", " ", "-", "_"]
+  suffixes: [inc, labs, io, hq, dev, corp, tech, sec]
+  include_word_combos: true
+  min_word_len: 2
+  max_variants: 60
+  max_total_variants: 120
+
+# --------------------------------------------------------------------
+# Confidence scoring (weights sum is clamped to 1.0 per entity).
+# --------------------------------------------------------------------
+scoring:
+  weights:
+    domain_anchor: 0.5             # target domain on profile/homepage/commit
+    exact_name_match: 0.3          # a variant == login or name
+    description_match: 0.15        # a variant inside the description
+    multi_source: 0.2              # seen via >1 source
+    web_dork: 0.15                 # surfaced by web dorking
+    owner_confirmed: 0.25          # (repos) owner is a confirmed org/user
+    commit_email_domain: 0.3       # sampled commit email hits a target domain
+  min_confidence: 0.0              # drop entities scoring below this
+
+# --------------------------------------------------------------------
+# GitHub rate-limit handling: automatic waits until reset.
+# --------------------------------------------------------------------
+rate_limit:
+  auto_wait: true
+  max_wait_seconds: 900
+  retry_max: 5
+  backoff_base: 2.0
+
+# --------------------------------------------------------------------
+# Output artifacts (all consumable by later tools with no manual steps).
+# --------------------------------------------------------------------
+output:
+  dir: ./output
+  json_file: results.json          # structured orgs/repos/users + summary
+  repos_flat_file: repos.txt       # flat repo URLs, ready to chain
+  notify_file: notify.txt          # Notify-compatible plain-text payload
+  pretty: true
+
+# ====================================================================
+# Tool chaining — run external tools on every discovered repo.
+# ====================================================================
+chaining:
+  enabled: false                   # or pass --chain on the CLI
+  workdir: ./output/chaining
+  clone: false                     # set true for tools that need a working tree
+  timeout_seconds: 1800
+  min_confidence: 0.0              # only chain over repos scoring >= this
+  commands:
+    # ==================== BLOQUE PARA PEGAR HERRAMIENTAS ====================
+    # One shell command per discovered repo. Placeholders:
+    #   {repo_url}   https clone URL      {repo}   owner/name
+    #   {owner}      owner login          {name}   repo name
+    #   {clone_dir}  local clone path (needs clone: true)
+    #   {output_dir} = chaining.workdir
+    #
+    # Paste YOUR tools below and flip enabled: true. Reference examples:
+    #
+    # - "trufflehog git {repo_url} --json >> {output_dir}/trufflehog.jsonl"
+    # - "gitleaks detect --source {clone_dir} --report-format json --report-path {output_dir}/{owner}__{name}.gitleaks.json"
+    # - "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}__{name}.credsweeper.json"
+    # - "python3 /opt/GitDorker/GitDorker.py -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
+    # - "git-wild-hunt -s {repo_url}"
+    # - "github-subdomains -d {name} -t $GITHUB_TOKEN -o {output_dir}/{owner}__{name}.subdomains.txt"
+    # =======================================================================
+
+# --------------------------------------------------------------------
+# ProjectDiscovery Notify integration (webhook fan-out).
+# --------------------------------------------------------------------
+notify:
+  enabled: false                   # or pass --notify on the CLI
+  binary: notify
+  provider_config_env: NOTIFY_PROVIDER_CONFIG   # path to notify's provider yaml
+  provider_config: ""              # optional explicit path (env var wins)
+  provider_id: ""                  # notify -id value, e.g. "recon"
+  bulk: true
+  payload: summary                 # summary | repos | json
