@@ -138,11 +138,12 @@ output:
 
 # ====================================================================
 # PHASE 2 — tool chaining: run external leak/recon tools per discovered repo.
+# Runs BY DEFAULT (enabled: true). Disable for a run with --no-chain.
 # ====================================================================
 chaining:
-  enabled: false                   # or pass --chain on the CLI
+  enabled: true                    # phase 2 runs by default (--no-chain to skip)
   workdir: ./output/chaining
-  clone: false                     # set true for tools that need a working tree
+  clone: true                      # clone each repo so {clone_dir} tools work
   timeout_seconds: 1800
   min_confidence: 0.0              # only chain over repos scoring >= this
   commands:
@@ -153,18 +154,19 @@ chaining:
     #   {clone_dir}  local clone path (needs clone: true)
     #   {output_dir} = chaining.workdir
     #
-    # Paste YOUR tools below and flip enabled: true.
+    # A command whose leading tool is NOT installed is skipped with an install
+    # hint (not a failure), so a partial toolbox still produces results.
     #
     # Prefer the wrappers install.sh puts on PATH (gitdorker, git-wild-hunt,
     # credsweeper): each runs its tool from its OWN venv. Do NOT call
     # 'python3 /opt/GitDorker/GitDorker.py' directly — that uses the system
     # python, which lacks the tool's deps ('No module named termcolor').
-    # trufflehog: pass --no-update so it doesn't try (and fail) to self-update
-    # a root-owned binary mid-run.
-    # Reference examples:
+    # trufflehog: --no-update stops it self-updating a root-owned binary mid-run.
     #
-    # - "trufflehog git {repo_url} --json --no-update >> {output_dir}/trufflehog.jsonl"
-    # - "gitleaks detect --source {clone_dir} --report-format json --report-path {output_dir}/{owner}__{name}.gitleaks.json"
+    # These two work out of the box after ./install.sh:
+    - "trufflehog git {repo_url} --no-update --json >> {output_dir}/trufflehog.jsonl"
+    - "gitleaks detect --source {clone_dir} --report-format json --report-path {output_dir}/{owner}__{name}.gitleaks.json"
+    # Uncomment to add more (keep the four leading spaces):
     # - "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}__{name}.credsweeper.json"
     # - "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
     # - "git-wild-hunt -s {repo_url}"

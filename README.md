@@ -16,8 +16,11 @@ external tools you wire into the [chaining](#tool-chaining) section.
 ## What it does
 
 The three phases of the workflow are: **1) enumeration** (this tool's core),
-**2) leak discovery** (your chaining tools), **3) per-leak notification** (your
-tools piping into Notify). git_locate owns phase 1 and hands off cleanly to 2/3.
+**2) leak discovery** (the chaining tools), **3) per-leak notification** (tools
+piping into Notify). **By default a single run does phase 1, fires the Notify
+at the 1→2 boundary, and then runs phase 2** over every discovered repo — no
+extra flags. `--no-chain` / `--no-notify` opt out of the phase-2 and Notify
+steps for a discovery-only run.
 
 ### Discovery methodology (phase 1)
 
@@ -131,7 +134,8 @@ Config resolution order: built-in defaults → `config.yaml`
 # activate the venv the installer created (or use .venv/bin/gitlocate directly)
 source .venv/bin/activate
 
-# basic discovery
+# basic discovery — runs ALL phases by default:
+#   phase 1 (enumerate) -> notify (phase 1->2) -> phase 2 (scan every repo)
 gitlocate -c "Acme Corp" -d acme.com
 
 # lists from files (the usual case) — one entry per line
@@ -144,8 +148,11 @@ gitlocate -c "Acme Corp" -c acme-labs -d acme.com -d acme.io -o ./acme-recon
 # disable web dorking for this run
 gitlocate --company-file companies.txt --domain-file domains.txt --no-web-dork
 
-# full run: enumerate, notify at phase 1->2, then run your chaining tools
-gitlocate --company-file companies.txt --domain-file domains.txt --chain --notify
+# discovery ONLY (skip phase 2 scanning and the notification)
+gitlocate -c "Acme Corp" -d acme.com --no-chain --no-notify
+
+# preview the phase-2 commands per repo without executing them
+gitlocate -c "Acme Corp" -d acme.com --dry-run
 
 # inspect the effective config
 gitlocate --print-config
@@ -203,11 +210,13 @@ shell pipelines.
 
 ## Tool chaining
 
-After discovery, `git_locate` can invoke a **configurable list of external
-tools** on every discovered repo. The command list lives entirely in
-`config.yaml` under `chaining.commands` — the block marked
-**`BLOQUE PARA PEGAR HERRAMIENTAS`** — so you paste in your own tooling without
-touching the code. Each command is expanded per repo with placeholders:
+After discovery, `git_locate` invokes a **configurable list of external tools**
+on every discovered repo. **This runs by default** — the shipped config enables
+it (`chaining.enabled: true`, `chaining.clone: true`) and comes with working
+`trufflehog` + `gitleaks` commands, so a plain `gitlocate -c … -d …` already
+scans. The command list lives in `config.yaml` under `chaining.commands` — the
+block marked **`BLOQUE PARA PEGAR HERRAMIENTAS`** — so you add your own tooling
+without touching the code. Each command is expanded per repo with placeholders:
 
 | Placeholder | Meaning |
 | --- | --- |
@@ -228,13 +237,26 @@ chaining:
     - "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
 ```
 
+**A command whose tool isn't installed is skipped, not failed.** git_locate
+checks each command's leading program against `PATH` first; if it's missing, it
+logs one line — `Skipped N command(s): 'trufflehog' is not installed. Install it
+with: ./install.sh trufflehog` — and moves on. So a partial toolbox still
+produces results instead of a wall of `command not found` errors. (This is the
+usual cause of "trufflehog doesn't run": the binary simply isn't on `PATH` —
+run `./install.sh trufflehog`.)
+
+**A scanner exiting non-zero is not treated as a failure.** Many scanners use a
+non-zero exit to signal *findings* — `gitleaks` exits `1` when it finds leaks,
+`trufflehog` exits `183` with `--fail`. git_locate surfaces the exit code but
+counts the command as run; only a launch failure or timeout is a real failure.
+
 Call the **wrappers `install.sh` puts on PATH** (`gitdorker`, `git-wild-hunt`,
 `credsweeper`), not the scripts under `/opt` directly. Each wrapper runs its
 tool from the dedicated venv the installer built. Invoking
 `python3 /opt/GitDorker/GitDorker.py` uses the *system* interpreter, which does
 not have the tool's dependencies — that is what `No module named 'termcolor'`
-means. Pass trufflehog `--no-update` so it does not try (and fail) to replace
-its own root-owned binary during a run.
+means. The default trufflehog command already passes `--no-update` so it does
+not try (and fail) to replace its own root-owned binary during a run.
 
 If a wrapped tool still errors on import (e.g. git-wild-hunt failing on
 `urllib3.packages.six.moves`), its venv has an incompatible dependency; repair
@@ -244,13 +266,14 @@ just that venv, for example:
 /opt/git-wild-hunt/.venv/bin/pip install 'urllib3<2' six
 ```
 
-Enable with `chaining.enabled: true` or the `--chain` flag. Use `--dry-run` to
-print the expanded commands without executing them.
+Phase 2 is **on by default** (`chaining.enabled: true`). Skip it for a run with
+`--no-chain`; force it (e.g. if you set `enabled: false`) with `--chain`. Use
+`--dry-run` to print the expanded commands for every repo without executing
+them — the preview shows all commands, even for tools not yet installed.
 
-`--chain` only *enables* the phase; it does not supply commands. With an empty
-`chaining.commands` the run logs `Chaining enabled but no commands configured;
-nothing to run.` and phase 2 ends immediately — that is a config gap, not a
-crash.
+If you clear `chaining.commands`, the run logs `Chaining enabled but no commands
+configured; nothing to run.` and phase 2 ends immediately — that is a config
+gap, not a crash.
 
 When uncommenting the example commands, remove only the `# ` and **keep the four
 leading spaces** — the list items must be indented under `commands:`. Dropping
@@ -276,7 +299,9 @@ The workflow has three phases:
 git_locate fires a **Notify message at the phase 1 → phase 2 boundary**: when
 enumeration finishes and leak discovery is about to start, you get a webhook with
 the target, the counts, and the repos queued for scanning. This is on by default
-(`notify.on_phase_transition: true`) and also triggerable with `--notify`.
+(`notify.on_phase_transition: true`); `--no-notify` skips it for a run and
+`--notify` forces it. If the `notify` binary isn't on `PATH`, the send is
+skipped with a warning — the rest of the run is unaffected.
 
 It is **Notify-compatible by design**: the `notify.txt` payload is plain,
 line-oriented text — exactly what `notify -bulk` consumes on stdin. Webhooks and
