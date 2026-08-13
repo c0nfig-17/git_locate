@@ -23,7 +23,10 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import List, NamedTuple, Optional, Tuple
+from typing import List, Optional, Tuple
+
+from .. import yamlcheck
+from ..yamlcheck import DuplicateKey
 
 try:
     import yaml  # type: ignore
@@ -36,15 +39,6 @@ log = logging.getLogger("gitlocate.notify")
 #: path too means the duplicate-key check still fires for the common setup where
 #: nothing is configured on the git_locate side.
 DEFAULT_PROVIDER_CONFIG = "~/.config/notify/provider-config.yaml"
-
-
-class DuplicateKey(NamedTuple):
-    """A key defined more than once inside the same YAML mapping."""
-
-    key: str
-    path: str          # dotted path of the parent mapping ("" = document root)
-    line: int          # 1-based line of the repeat
-    first_line: int    # 1-based line of the first definition
 
 
 def _resolve_provider_config(config) -> Optional[str]:
@@ -74,38 +68,6 @@ def resolve_provider_config(config) -> Tuple[Optional[str], bool]:
 # ---------------------------------------------------------------------------
 # Provider-config validation
 # ---------------------------------------------------------------------------
-def _walk(node, path: str, found: List[DuplicateKey]) -> None:
-    """Collect duplicate mapping keys from a composed YAML node tree."""
-    if isinstance(node, yaml.MappingNode):
-        seen = {}
-        for key_node, value_node in node.value:
-            key = str(getattr(key_node, "value", key_node))
-            line = key_node.start_mark.line + 1
-            if key in seen:
-                found.append(DuplicateKey(key=key, path=path, line=line,
-                                          first_line=seen[key]))
-            else:
-                seen[key] = line
-            _walk(value_node, f"{path}.{key}" if path else key, found)
-    elif isinstance(node, yaml.SequenceNode):
-        for index, child in enumerate(node.value):
-            _walk(child, f"{path}[{index}]", found)
-
-
-def find_duplicate_keys(text: str) -> List[DuplicateKey]:
-    """Find keys defined twice in the same mapping, anywhere in ``text``.
-
-    PyYAML silently keeps the last value; Notify's Go parser rejects the file
-    outright. Composing the node tree (rather than loading it) keeps the source
-    line of every key so the report can point at what to merge.
-    """
-    found: List[DuplicateKey] = []
-    for document in yaml.compose_all(text):
-        if document is not None:
-            _walk(document, "", found)
-    return found
-
-
 def _duplicate_key_report(path: str, duplicates: List[DuplicateKey]) -> List[str]:
     lines = [f"Notify provider config has duplicate YAML keys: {path}"]
     for dup in duplicates:
@@ -161,10 +123,9 @@ def check_provider_config(path: str, require_exists: bool = True) -> List[str]:
         return [f"Notify provider config could not be read: {exc}"]
 
     try:
-        duplicates = find_duplicate_keys(text)
+        duplicates = yamlcheck.find_duplicate_keys(text)
     except yaml.YAMLError as exc:
-        return [f"Notify provider config is not valid YAML: {path}",
-                f"  {str(exc).strip()}"]
+        return yamlcheck.format_yaml_error(path, exc).splitlines()
     if duplicates:
         return _duplicate_key_report(path, duplicates)
     return []

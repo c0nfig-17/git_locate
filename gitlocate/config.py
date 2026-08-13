@@ -14,13 +14,18 @@ secret, and the actual value is read from the environment at runtime.
 from __future__ import annotations
 
 import copy
+import logging
 import os
 from typing import Any, Dict, List, Optional
+
+from . import yamlcheck
 
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover - dependency missing
     yaml = None
+
+log = logging.getLogger("gitlocate.config")
 
 
 DEFAULTS: Dict[str, Any] = {
@@ -261,9 +266,22 @@ def load_config(path: Optional[str] = None) -> Config:
                 "Install it with `pip install pyyaml`."
             )
         with open(cfg_path, "r", encoding="utf-8") as fh:
-            file_data = yaml.safe_load(fh) or {}
+            text = fh.read()
+        try:
+            file_data = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            # ValueError so the CLI reports it as a config problem (exit 2)
+            # instead of dumping a PyYAML traceback at the operator.
+            raise ValueError(yamlcheck.format_yaml_error(cfg_path, exc)) from exc
         if not isinstance(file_data, dict):
             raise ValueError(f"Config file {cfg_path} must contain a YAML mapping")
+        # PyYAML keeps the last of two identical keys without a word, which
+        # silently discards a whole block (e.g. two 'chaining:' sections).
+        for dup in yamlcheck.find_duplicate_keys(text):
+            where = f"{dup.path}.{dup.key}" if dup.path else dup.key
+            log.warning("%s line %d: '%s' is already defined at line %d — the "
+                        "earlier block is ignored; merge them.",
+                        cfg_path, dup.line, where, dup.first_line)
         data = _deep_merge(data, file_data)
 
     data = apply_env_overrides(data)

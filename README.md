@@ -230,6 +230,22 @@ chaining:
 Enable with `chaining.enabled: true` or the `--chain` flag. Use `--dry-run` to
 print the expanded commands without executing them.
 
+`--chain` only *enables* the phase; it does not supply commands. With an empty
+`chaining.commands` the run logs `Chaining enabled but no commands configured;
+nothing to run.` and phase 2 ends immediately — that is a config gap, not a
+crash.
+
+When uncommenting the example commands, remove only the `# ` and **keep the four
+leading spaces** — the list items must be indented under `commands:`. Dropping
+them yields ` - "trufflehog …"` at column 2 and the file stops parsing. A
+malformed `config.yaml` is reported with its line, column and a caret:
+
+```
+Failed to load config: config.yaml is not valid YAML: expected <block end>, but found '<block sequence start>' (line 158, column 2)
+  158 |  - "trufflehog git {repo_url} --json >> {output_dir}/trufflehog.jsonl"
+         ^
+```
+
 ---
 
 ## Notify integration & the phase model
