@@ -168,6 +168,17 @@ chaining:
 # By default a Notify message fires at the PHASE 1 -> PHASE 2 boundary
 # (enumeration done, leak discovery starting). Phase 3 (per-leak alerts) is
 # done by the chaining tools piping their own findings into `notify`.
+#
+# Webhooks/secrets live in Notify's OWN provider-config YAML, not here. In that
+# file each provider key appears ONCE and holds a LIST of destinations:
+#   custom:
+#     - id: one
+#       custom_webhook_url: https://example.com/one
+#     - id: two
+#       custom_webhook_url: https://example.com/two
+# Repeating the `custom:` key instead of adding a list item makes Notify fail
+# with 'could not parse provider config file ... mapping key "custom" already
+# defined'. Validate it with: gitlocate --check-notify-config
 # --------------------------------------------------------------------
 notify:
   enabled: false                   # force-send regardless of phase

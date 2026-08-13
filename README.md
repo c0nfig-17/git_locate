@@ -149,6 +149,9 @@ gitlocate --company-file companies.txt --domain-file domains.txt --chain --notif
 
 # inspect the effective config
 gitlocate --print-config
+
+# validate Notify's provider-config YAML before relying on it
+gitlocate --check-notify-config
 ```
 
 Targets can come from **CLI flags, files, or the `targets:` block in
@@ -251,6 +254,54 @@ payload in. Choose what to send with `notify.payload`: `phase_transition`
 
 For **phase 3**, have your chaining commands pipe each finding into `notify`,
 e.g. `trufflehog git {repo_url} --json | notify -bulk`.
+
+### The provider config: one block per provider
+
+Notify's provider config is a mapping of **provider name → list of
+destinations**. Adding a second webhook means adding an *item to the list*, not
+repeating the key. This is invalid:
+
+```yaml
+custom:                                  # line 78
+  - id: one
+    custom_webhook_url: https://example.com/one
+custom:                                  # line 86  ← duplicate key
+  - id: two
+    custom_webhook_url: https://example.com/two
+```
+
+YAML forbids two identical keys in the same mapping, so Notify aborts before it
+sends anything:
+
+```
+[FTL] Could not create runner: could not parse provider config file: yaml: unmarshal errors:
+  line 86: mapping key "custom" already defined at line 78
+```
+
+The fix is to merge them into one list:
+
+```yaml
+custom:
+  - id: one
+    custom_webhook_url: https://example.com/one
+  - id: two
+    custom_webhook_url: https://example.com/two
+```
+
+Every entry keeps its own `id`, so `notify -id one` (or `notify.provider_id` in
+`config.yaml`) still targets a single destination.
+
+git_locate checks this file **before** invoking Notify and reports the colliding
+line numbers instead of letting you hit the bare parser error. Check it any time
+with:
+
+```bash
+gitlocate --check-notify-config     # exit 0 = parses, 1 = problems reported
+```
+
+It validates the path from `$NOTIFY_PROVIDER_CONFIG`, then
+`notify.provider_config`, falling back to Notify's own default
+(`~/.config/notify/provider-config.yaml`).
 
 ---
 
