@@ -242,6 +242,36 @@ e.g. `trufflehog git {repo_url} --json | notify -bulk`.
 
 ---
 
+## Debugging & logs
+
+Every run writes a **full DEBUG log to a file** (default
+`<output.dir>/gitlocate.log`), independent of the console verbosity. It records
+each action so a failure can be diagnosed from the log alone — no need to
+reproduce it:
+
+- a run header: tool version, Python, platform, argv, config file, and which
+  expected env vars are **present** (never their values);
+- every HTTP request: method, URL, params/query, status, timing, and the
+  rate-limit headers (`resource`, `remaining`, `reset`);
+- every rate-limit wait (reactive and proactive) and network/timeout error;
+- each discovery phase and its counts, plus an end-of-run request summary
+  (`N requests, N waits (Ns total), N rate-limited, ...`);
+- web queries and result counts, the Notify invocation, and every chaining
+  command with its exit code and duration.
+
+```bash
+gitlocate --company-file companies.txt --domain-file domains.txt --debug
+# console is verbose too; the file at output/gitlocate.log is always full DEBUG
+```
+
+Flags: `--debug` (verbose console), `--log-file PATH` (relocate the log),
+`--no-log-file` (disable). The **installer** writes the same kind of transcript
+to `install.log`.
+
+**When something breaks, send the relevant log** (`gitlocate.log` or
+`install.log`) — it contains the request-by-request trail needed to pinpoint the
+failure. Secrets are never written to it.
+
 ## How confidence is scored
 
 Weighted, explainable signals (weights configurable under `scoring.weights`),
@@ -272,6 +302,7 @@ gitlocate/
 ├── cli.py              # argument parsing + orchestration
 ├── engine.py           # discovery pipeline (orgs -> repos -> users)
 ├── config.py           # defaults + YAML + env, no hardcoded secrets
+├── logging_setup.py    # console + always-on DEBUG file log
 ├── variants.py         # company-name variant generation
 ├── scoring.py          # confidence scoring
 ├── models.py           # Entity / Findings data model

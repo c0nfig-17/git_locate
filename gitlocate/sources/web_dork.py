@@ -104,6 +104,8 @@ class DuckDuckGoProvider(WebDorkProvider):
             raise RuntimeError("The 'requests' package is required for web dorking.")
         self.endpoint = config.get("web_dork.duckduckgo_endpoint",
                                    "https://html.duckduckgo.com/html/")
+        self.timeout = (float(config.get("web_dork.connect_timeout", 10)),
+                        float(config.get("web_dork.read_timeout", 30)))
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64; rv:123.0) "
@@ -133,16 +135,19 @@ class DuckDuckGoProvider(WebDorkProvider):
         return urls
 
     def search(self, query: str) -> List[str]:
+        log.debug("DuckDuckGo query: %r", query)
         try:
             resp = self.session.post(self.endpoint, data={"q": query, "kl": "us-en"},
-                                     timeout=30)
+                                     timeout=self.timeout)
         except requests.RequestException as exc:
             log.warning("DuckDuckGo request failed: %s", exc)
             return []
         if resp.status_code != 200:
-            log.warning("DuckDuckGo returned HTTP %s", resp.status_code)
+            log.warning("DuckDuckGo returned HTTP %s for query %r", resp.status_code, query)
             return []
-        return self.extract_urls(resp.text)
+        urls = self.extract_urls(resp.text)
+        log.debug("DuckDuckGo query %r -> %d links", query, len(urls))
+        return urls
 
 
 class SerperProvider(WebDorkProvider):
@@ -157,6 +162,8 @@ class SerperProvider(WebDorkProvider):
             raise RuntimeError("The 'requests' package is required for web dorking.")
         self.endpoint = config.get("web_dork.endpoint", "https://google.serper.dev/search")
         self.num = int(config.get("web_dork.num", 20))
+        self.timeout = (float(config.get("web_dork.connect_timeout", 10)),
+                        float(config.get("web_dork.read_timeout", 30)))
         self.session = requests.Session()
         self.session.headers.update({
             "X-API-KEY": api_key,
@@ -165,14 +172,16 @@ class SerperProvider(WebDorkProvider):
         })
 
     def search(self, query: str) -> List[str]:
+        log.debug("Serper query: %r", query)
         try:
             resp = self.session.post(self.endpoint,
-                                     json={"q": query, "num": self.num}, timeout=30)
+                                     json={"q": query, "num": self.num},
+                                     timeout=self.timeout)
         except requests.RequestException as exc:
             log.warning("Serper request failed: %s", exc)
             return []
         if resp.status_code != 200:
-            log.warning("Serper returned HTTP %s", resp.status_code)
+            log.warning("Serper returned HTTP %s for query %r", resp.status_code, query)
             return []
         try:
             data = resp.json()

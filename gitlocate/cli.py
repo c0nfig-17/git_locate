@@ -8,6 +8,7 @@ import sys
 from typing import List, Optional
 
 from . import ETHICAL_NOTICE, __tool_name__, __version__
+from . import logging_setup
 from .config import load_config
 from .chaining import Chainer
 from .engine import Engine
@@ -85,29 +86,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-config", action="store_true",
                    help="Print the effective merged configuration and exit.")
     p.add_argument("-v", "--verbose", action="count", default=0,
-                   help="Increase log verbosity (-v, -vv).")
+                   help="Increase console log verbosity (-v, -vv).")
     p.add_argument("-q", "--quiet", action="store_true", help="Only log warnings/errors.")
+    p.add_argument("--debug", action="store_true",
+                   help="Verbose DEBUG output on the console (the file log is "
+                        "always DEBUG regardless).")
+    p.add_argument("--log-file", metavar="PATH",
+                   help="Debug log file path (default: <output.dir>/gitlocate.log). "
+                        "Hand this file over when reporting a problem.")
+    p.add_argument("--no-log-file", action="store_true",
+                   help="Do not write the debug log file.")
     p.add_argument("--version", action="version",
                    version=f"{__tool_name__} {__version__}")
     return p
 
 
-def _setup_logging(verbose: int, quiet: bool) -> None:
-    level = logging.INFO
-    if quiet:
-        level = logging.WARNING
-    elif verbose >= 2:
-        level = logging.DEBUG
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-
 def main(argv: Optional[List[str]] = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = build_parser().parse_args(argv)
-    _setup_logging(args.verbose, args.quiet)
+    logging_setup.configure_console(args.verbose, args.quiet, args.debug)
 
     log.warning("ETHICAL USE NOTICE: %s", ETHICAL_NOTICE)
 
@@ -128,6 +125,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(config.data, indent=2, default=str))
         return 0
 
+    # -- attach the debug log file + write the diagnostic header ----------
+    log_path = None
+    if not args.no_log_file:
+        out_dir = config.get("output.dir", "./output")
+        log_path = args.log_file or os.path.join(out_dir, "gitlocate.log")
+        log_path = logging_setup.attach_file_handler(log_path)
+    logging_setup.log_run_header(config, raw_argv, log_path,
+                                 args.config or os.environ.get("GITLOCATE_CONFIG"))
+    if log_path:
+        log.info("Debug log: %s", log_path)
+
     # Targets: CLI flags + files + a `targets:` block in the config file.
     companies = _collect(
         args.company, args.company_file or config.get("targets.companies_file"))
@@ -145,6 +153,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "which significantly weakens confidence scoring.")
 
     log.info("Targets: companies=%s domains=%s", companies, domains)
+    args._companies = companies
+    args._domains = domains
+
+    try:
+        return _run_phases(args, config)
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user.")
+        return 130
+    except Exception:  # noqa: BLE001 - top-level guard: log full traceback
+        log.exception("Unhandled error during execution. The full traceback has "
+                      "been written to the debug log%s.",
+                      f" ({log_path})" if log_path else "")
+        return 1
+
+
+def _run_phases(args, config) -> int:
+    """Execute phase 1 (enumeration) and optionally phase 2 (chaining)."""
+    companies = args._companies
+    domains = args._domains
 
     # ============================ PHASE 1: enumeration =====================
     log.info("=== Phase 1: enumeration (discovery) ===")

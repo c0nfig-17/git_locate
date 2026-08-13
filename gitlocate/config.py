@@ -36,6 +36,8 @@ DEFAULTS: Dict[str, Any] = {
         "api_url": "https://api.github.com",
         "per_page": 100,
         "max_pages": 3,
+        "connect_timeout": 10,           # seconds to establish a connection
+        "read_timeout": 30,              # seconds to wait for a response
         "enumerate_owner_repos": True,   # list repos of confirmed orgs/users
         "owner_repo_min_confidence": 0.4,
         "fetch_profiles": True,          # pull blog/email for domain anchoring
@@ -76,6 +78,8 @@ DEFAULTS: Dict[str, Any] = {
         "use_variants": False,           # query human names only (low volume)
         "max_queries": 12,               # hard cap on web requests per run
         "delay_seconds": 1.0,            # politeness delay between web requests
+        "connect_timeout": 10,
+        "read_timeout": 30,
         "queries": [
             "site:github.com {name}",
             '"{name}" github',
@@ -106,6 +110,7 @@ DEFAULTS: Dict[str, Any] = {
     },
     "rate_limit": {
         "auto_wait": True,
+        "proactive": True,               # wait BEFORE a request when bucket empty
         "max_wait_seconds": 900,
         "retry_max": 5,
         "backoff_base": 2.0,

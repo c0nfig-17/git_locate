@@ -48,6 +48,20 @@ class GitHubClient:
         self.max_wait = int(rl.get("max_wait_seconds", 900))
         self.retry_max = int(rl.get("retry_max", 5))
         self.backoff_base = float(rl.get("backoff_base", 2.0))
+        self.proactive = bool(rl.get("proactive", True))
+        # (connect, read) timeout tuple — a connect timeout stops a dead host
+        # from hanging for the full read timeout on every attempt.
+        self.timeout = (
+            float(config.get("github.connect_timeout", 10)),
+            float(config.get("github.read_timeout", 30)),
+        )
+        # Per-resource rate-limit state: resource -> {"remaining", "reset"}.
+        self._rl_state: Dict[str, Dict[str, float]] = {}
+        # Cumulative counters for the end-of-run debug summary.
+        self.stats: Dict[str, float] = {
+            "requests": 0, "waits": 0, "wait_seconds": 0.0,
+            "rate_limited": 0, "network_errors": 0, "http_errors": 0,
+        }
 
         self.session = requests.Session()
         headers = {
@@ -58,32 +72,56 @@ class GitHubClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self.session.headers.update(headers)
+        log.debug("GitHubClient ready: api=%s authenticated=%s timeout=%s "
+                  "proactive_throttle=%s", self.api_url, bool(token), self.timeout,
+                  self.proactive)
 
     # -- low-level request with rate-limit awareness ----------------------
-    def _request(self, method: str, url: str, **kwargs) -> Optional["requests.Response"]:
+    def _request(self, method: str, url: str, resource: str = "core",
+                 **kwargs) -> Optional["requests.Response"]:
         attempt = 0
         while True:
             attempt += 1
+            # Proactively wait if we already know this resource's bucket is
+            # empty — avoids spending a request just to receive a 403.
+            self._proactive_throttle(resource)
+            params = kwargs.get("params")
+            started = time.monotonic()
             try:
-                resp = self.session.request(method, url, timeout=30, **kwargs)
-            except requests.RequestException as exc:  # network hiccup
+                resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            except requests.RequestException as exc:  # network/timeout hiccup
+                self.stats["network_errors"] += 1
+                log.debug("HTTP %s %s params=%s NETWORK-ERROR (attempt %d): %s",
+                          method, url, params, attempt, exc)
                 if attempt > self.retry_max:
                     log.warning("Request failed after %d attempts: %s", attempt, exc)
                     return None
                 self._sleep(self.backoff_base ** attempt, "network error")
                 continue
 
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            self.stats["requests"] += 1
+            self._record_rate_limit(resource, resp)
+            log.debug("HTTP %s %s params=%s -> %s in %.0fms "
+                      "[%s remaining=%s reset=%s]",
+                      method, url, params, resp.status_code, elapsed_ms,
+                      resp.headers.get("X-RateLimit-Resource", resource),
+                      resp.headers.get("X-RateLimit-Remaining"),
+                      resp.headers.get("X-RateLimit-Reset"))
+
             # 429 is always throttling; a 403 is throttling ONLY when it carries
             # rate-limit evidence. A bare 403 (permissions, blocked by a proxy,
             # SSO) must return immediately instead of looping with backoff.
             if resp.status_code in (403, 429):
-                if self._is_rate_limited(resp) and \
-                        self._maybe_wait_for_reset(resp, attempt):
-                    continue
+                if self._is_rate_limited(resp):
+                    self.stats["rate_limited"] += 1
+                    if self._maybe_wait_for_reset(resp, attempt):
+                        continue
                 if resp.status_code == 403:
                     log.warning("HTTP 403 (not rate-limit; permissions/proxy?): %s", url)
                 else:
                     log.warning("Rate limited (429) and giving up: %s", url)
+                self.stats["http_errors"] += 1
                 return resp
 
             if resp.status_code >= 500:
@@ -139,22 +177,53 @@ class GitHubClient:
         self._sleep(wait, "rate limit")
         return True
 
-    @staticmethod
-    def _sleep(seconds: float, reason: str) -> None:
+    def _sleep(self, seconds: float, reason: str) -> None:
         seconds = max(0.5, seconds)
+        self.stats["waits"] += 1
+        self.stats["wait_seconds"] += seconds
         log.info("Waiting %.1fs (%s)", seconds, reason)
         time.sleep(seconds)
 
-    def _get_json(self, path_or_url: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    def _record_rate_limit(self, resource: str, resp) -> None:
+        """Remember the rate-limit bucket state reported by a response."""
+        res = resp.headers.get("X-RateLimit-Resource", resource)
+        remaining = resp.headers.get("X-RateLimit-Remaining")
+        reset = resp.headers.get("X-RateLimit-Reset")
+        if remaining is None:
+            return
+        try:
+            self._rl_state[res] = {"remaining": float(remaining),
+                                   "reset": float(reset) if reset else 0.0}
+        except ValueError:
+            pass
+
+    def _proactive_throttle(self, resource: str) -> None:
+        """Sleep until reset if this resource's bucket is known-empty."""
+        if not (self.proactive and self.auto_wait):
+            return
+        state = self._rl_state.get(resource)
+        if not state or state["remaining"] > 0:
+            return
+        wait = state["reset"] - time.time() + 1.0
+        if 0 < wait <= self.max_wait:
+            log.debug("Proactive throttle on '%s' bucket (empty)", resource)
+            self._sleep(wait, f"proactive {resource} rate limit")
+            # Assume the bucket refills after reset.
+            state["remaining"] = 1
+
+    def _get_json(self, path_or_url: str, params: Optional[Dict] = None,
+                  resource: str = "core") -> Optional[Dict]:
         url = path_or_url if path_or_url.startswith("http") else f"{self.api_url}{path_or_url}"
-        resp = self._request("GET", url, params=params)
+        resp = self._request("GET", url, resource=resource, params=params)
         if resp is None or resp.status_code != 200:
             if resp is not None and resp.status_code not in (200, 404):
-                log.debug("GET %s -> %s", url, resp.status_code)
+                self.stats["http_errors"] += 1
+                log.debug("GET %s -> %s (non-200)", url, resp.status_code)
             return None
         try:
             return resp.json()
         except ValueError:
+            log.debug("GET %s -> 200 but body was not valid JSON", url)
             return None
 
     # -- search -----------------------------------------------------------
@@ -163,16 +232,28 @@ class GitHubClient:
         items: List[Dict] = []
         for page in range(1, self.max_pages + 1):
             params = {"q": query, "per_page": self.per_page, "page": page}
-            data = self._get_json(f"/search/{endpoint}", params=params)
+            data = self._get_json(f"/search/{endpoint}", params=params, resource="search")
             if not data:
                 break
             batch = data.get("items", [])
             items.extend(batch)
+            total = data.get("total_count", 0)
+            log.debug("search/%s q=%r page=%d -> %d items (total_count=%d)",
+                      endpoint, query, page, len(batch), total)
             if len(batch) < self.per_page:
                 break
-            if len(items) >= data.get("total_count", 0):
+            if len(items) >= total:
                 break
         return items
+
+    def log_stats(self) -> None:
+        """Emit the cumulative request/rate-limit counters (end of run)."""
+        s = self.stats
+        log.info("GitHub API: %d requests, %d waits (%.1fs total), "
+                 "%d rate-limited, %d network errors, %d http errors",
+                 int(s["requests"]), int(s["waits"]), s["wait_seconds"],
+                 int(s["rate_limited"]), int(s["network_errors"]),
+                 int(s["http_errors"]))
 
     @staticmethod
     def _in_qualifier(fields: Iterable[str]) -> str:

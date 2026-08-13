@@ -24,6 +24,7 @@ import logging
 import os
 import shlex
 import subprocess
+import time
 from typing import Dict, List, Optional
 
 from .models import Entity, Findings, KIND_REPO
@@ -120,17 +121,21 @@ class Chainer:
             log.info("[dry-run] %s", cmd)
             return True
         log.info("chaining: %s", cmd)
+        started = time.monotonic()
         try:
             # shell=True so operators can use pipes/redirects in their commands.
             proc = subprocess.run(cmd, shell=True, timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            log.warning("Command timed out: %s", cmd)
+            log.warning("Command timed out after %ss: %s", self.timeout, cmd)
             return False
         except OSError as exc:
             log.warning("Command failed to start: %s (%s)", cmd, exc)
             return False
+        elapsed = time.monotonic() - started
+        log.debug("chaining command exited %s in %.1fs: %s",
+                  proc.returncode, elapsed, cmd)
         if proc.returncode != 0:
-            log.warning("Command exited %s: %s", proc.returncode, cmd)
+            log.warning("Command exited %s (%.1fs): %s", proc.returncode, elapsed, cmd)
             return False
         return True
 

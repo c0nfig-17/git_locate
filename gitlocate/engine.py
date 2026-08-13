@@ -110,7 +110,12 @@ class Engine:
 
         # --- Final scoring + filter -------------------------------------
         self.scorer.score_all(findings, variant_set)
-        return self._filter(findings)
+        result = self._filter(findings)
+        log.info("Enumeration totals: %d orgs, %d repos, %d users (pre-filter %d)",
+                 len(result.of_kind(KIND_ORG)), len(result.of_kind(KIND_REPO)),
+                 len(result.of_kind(KIND_USER)), len(findings))
+        gh.log_stats()
+        return result
 
     # -- builders ---------------------------------------------------------
     def _build_github(self) -> Optional[GitHubClient]:

@@ -49,11 +49,22 @@ for arg in "$@"; do
   esac
 done
 
+# ---- full-transcript logging ----------------------------------------
+# Everything printed (including apt/go/pip output) is teed to install.log so
+# you can hand the whole transcript over when an install step fails.
+INSTALL_LOG="${INSTALL_LOG:-$REPO_ROOT/install.log}"
+: > "$INSTALL_LOG" 2>/dev/null || INSTALL_LOG="/tmp/git_locate-install.log"
+exec > >(tee -a "$INSTALL_LOG") 2>&1
+echo "===== git_locate install started $(date -u +%FT%TZ) ====="
+echo "args=[$*] user=$(id -un 2>/dev/null) uid=$(id -u) host=$(uname -srm 2>/dev/null)"
+echo "log: $INSTALL_LOG"
+
 # ---- helpers --------------------------------------------------------
 c_green="\033[0;32m"; c_yellow="\033[0;33m"; c_red="\033[0;31m"; c_reset="\033[0m"
-log()  { echo -e "${c_green}[+]${c_reset} $*"; }
-warn() { echo -e "${c_yellow}[!]${c_reset} $*" >&2; }
-err()  { echo -e "${c_red}[x]${c_reset} $*" >&2; }
+_ts() { date -u +%H:%M:%S; }
+log()  { echo -e "${c_green}[+]${c_reset} $(_ts) $*"; }
+warn() { echo -e "${c_yellow}[!]${c_reset} $(_ts) $*" >&2; }
+err()  { echo -e "${c_red}[x]${c_reset} $(_ts) $*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
@@ -243,6 +254,9 @@ Next steps:
        gitlocate -c "Acme Corp" -d acme.com
      (or without activating: ${VENV_DIR}/bin/gitlocate -c "Acme Corp" -d acme.com)
 
+Full install transcript saved to: ${INSTALL_LOG}
+(attach it if any install step failed)
+
 Reminder: use git_locate ONLY against targets you are authorized to test.
 EOF
 }
@@ -260,6 +274,7 @@ main() {
     log "--core-only: skipping external tool installation"
   fi
   print_summary
+  echo "===== git_locate install finished $(date -u +%FT%TZ) ====="
 }
 
 main
