@@ -244,9 +244,11 @@ def _run_phases(args, config) -> int:
         log.info("=== Phase 2: leak discovery (chaining) ===")
         chainer = Chainer(config, dry_run=args.dry_run)
         stats = chainer.run(findings)
-        log.info("Chaining: %d repos, %d commands run, %d failures, %d skipped",
-                 stats["repos"], stats["commands_run"], stats["failures"],
-                 stats["skipped"])
+        verb = "would run" if args.dry_run else "run"
+        suffix = " (dry-run: nothing was executed)" if args.dry_run else ""
+        log.info("Chaining: %d repos, %d commands %s, %d failures, %d skipped%s",
+                 stats["repos"], stats["commands_run"], verb, stats["failures"],
+                 stats["skipped"], suffix)
     else:
         log.info("Phase 2 (leak discovery) not run. Enable with --chain or "
                  "chaining.enabled, after pasting your tools into config.yaml.")

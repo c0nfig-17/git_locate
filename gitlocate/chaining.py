@@ -79,7 +79,18 @@ class Chainer:
                         len(needs_clone))
 
         os.makedirs(self.workdir, exist_ok=True)
-        repos = [e for e in findings.of_kind(KIND_REPO) if e.confidence >= self.min_conf]
+        all_repos = findings.of_kind(KIND_REPO)
+        repos = [e for e in all_repos if e.confidence >= self.min_conf]
+        if not repos:
+            if not all_repos:
+                log.info("No repositories discovered in phase 1; nothing to "
+                         "chain over. Check the target (a real company name, "
+                         "ideally with -d <domain>).")
+            else:
+                log.info("None of the %d discovered repo(s) scored >= %.2f "
+                         "(chaining.min_confidence); nothing to chain. Lower the "
+                         "threshold to include them.", len(all_repos), self.min_conf)
+            return stats
         for entity in repos:
             stats["repos"] += 1
             clone_dir = ""
