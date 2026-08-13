@@ -267,8 +267,17 @@ install_core() {
   # shellcheck disable=SC1091
   "${REPO_ROOT}/${VENV_DIR}/bin/pip" install --upgrade pip wheel >/dev/null
   log "Installing git_locate and Python dependencies"
-  "${REPO_ROOT}/${VENV_DIR}/bin/pip" install -e "${REPO_ROOT}" \
-    || "${REPO_ROOT}/${VENV_DIR}/bin/pip" install -r "${REPO_ROOT}/requirements.txt"
+  local pip="${REPO_ROOT}/${VENV_DIR}/bin/pip"
+  if "$pip" install -e "${REPO_ROOT}"; then
+    :
+  elif "$pip" install "${REPO_ROOT}"; then
+    warn "editable install failed; installed the package non-editable instead"
+  else
+    warn "package install failed; installing runtime deps only "\
+"(you can still run 'python -m gitlocate' from ${REPO_ROOT})"
+    "$pip" install -r "${REPO_ROOT}/requirements.txt" \
+      || { err "dependency install failed — see ${INSTALL_LOG}"; return 1; }
+  fi
   # Seed a config.yaml if the operator has none yet.
   if [ ! -f "${REPO_ROOT}/config.yaml" ]; then
     cp "${REPO_ROOT}/config.yaml.example" "${REPO_ROOT}/config.yaml"
@@ -291,8 +300,10 @@ install_gitdorker() {
   clone_or_update https://github.com/obheda12/GitDorker "$dest" || return 1
   run_priv python3 -m venv "${dest}/.venv" || return 1
   run_priv "${dest}/.venv/bin/pip" install --upgrade pip >/dev/null
-  [ -f "${dest}/requirements.txt" ] && \
-    run_priv "${dest}/.venv/bin/pip" install -r "${dest}/requirements.txt" >/dev/null
+  if [ -f "${dest}/requirements.txt" ]; then
+    run_priv "${dest}/.venv/bin/pip" install -r "${dest}/requirements.txt" >/dev/null \
+      || warn "GitDorker requirements failed to install (it may not run; see ${INSTALL_LOG})"
+  fi
   # Convenience wrapper on PATH.
   printf '#!/usr/bin/env bash\nexec %s/.venv/bin/python %s/GitDorker.py "$@"\n' "$dest" "$dest" \
     | run_priv tee "${GOBIN_DIR}/gitdorker" >/dev/null
@@ -334,8 +345,10 @@ install_git_wild_hunt() {
     # Python project — set up an isolated venv + a PATH wrapper.
     python3 -m venv "${dest}/.venv" || return 1
     "${dest}/.venv/bin/pip" install --upgrade pip >/dev/null
-    [ -f "$dest/requirements.txt" ] && \
-      "${dest}/.venv/bin/pip" install -r "$dest/requirements.txt" >/dev/null
+    if [ -f "$dest/requirements.txt" ]; then
+      "${dest}/.venv/bin/pip" install -r "$dest/requirements.txt" >/dev/null \
+        || warn "git-wild-hunt requirements failed to install (see ${INSTALL_LOG})"
+    fi
     local main="$dest/git-wild-hunt.py"
     [ -f "$main" ] || main="$(ls "$dest"/*.py 2>/dev/null | head -1)"
     [ -n "$main" ] || { warn "git-wild-hunt: no entry .py found"; return 1; }
@@ -393,15 +406,49 @@ Next steps:
        export NOTIFY_PROVIDER_CONFIG=~/.config/notify/provider-config.yaml
   2. Edit ./config.yaml (paste your chaining tools in the marked block).
   3. Run it:
-       source ${VENV_DIR}/bin/activate
+       source ${REPO_ROOT}/${VENV_DIR}/bin/activate
        gitlocate -c "Acme Corp" -d acme.com
-     (or without activating: ${VENV_DIR}/bin/gitlocate -c "Acme Corp" -d acme.com)
+     (or without activating: ${REPO_ROOT}/${VENV_DIR}/bin/gitlocate -c "Acme Corp" -d acme.com)
 
 Full install transcript saved to: ${INSTALL_LOG}
 (attach it if any install step failed)
 
 Reminder: use git_locate ONLY against targets you are authorized to test.
 EOF
+}
+
+# ---- post-install verification --------------------------------------
+# A present binary is not proof it works: Python-wrapped tools can be on PATH
+# yet broken if their deps failed to install. We actually RUN each tool.
+_soft_probe() {
+  local name="$1"; shift
+  have "$name" || return 0    # absence is already shown in the summary
+  if "$@" >/dev/null 2>&1; then
+    log "  ${name}: OK (responds to '$*')"
+  else
+    warn "  ${name}: on PATH but '$*' returned non-zero — may be broken; see ${INSTALL_LOG}"
+  fi
+}
+
+verify_install() {
+  echo
+  log "Post-install verification (running each tool):"
+  local gl="${REPO_ROOT}/${VENV_DIR}/bin/gitlocate"
+  local py="${REPO_ROOT}/${VENV_DIR}/bin/python"
+  if [ -x "$gl" ] && "$gl" --version >/dev/null 2>&1; then
+    log "  gitlocate: OK ($("$gl" --version 2>&1))"
+  elif [ -x "$py" ] && "$py" -m gitlocate --version >/dev/null 2>&1; then
+    log "  gitlocate: OK (via 'python -m gitlocate')"
+  else
+    err "  gitlocate: DID NOT RUN — the core tool is broken; see ${INSTALL_LOG}"
+  fi
+  # Go binaries: presence ~= works. Python-wrapped tools: actually exercise them.
+  _soft_probe trufflehog    trufflehog --version
+  _soft_probe gitleaks      gitleaks version
+  _soft_probe notify        notify -version
+  _soft_probe credsweeper   credsweeper --version
+  _soft_probe gitdorker     gitdorker -h
+  _soft_probe git-wild-hunt git-wild-hunt -h
 }
 
 # Install a single named tool (for `install.sh <tool>` targeted re-runs).
@@ -426,6 +473,7 @@ main() {
     log "Targeted install: ${ONLY_TOOLS[*]}"
     for t in "${ONLY_TOOLS[@]}"; do try "$t" run_named_tool "$t"; done
     print_summary
+    verify_install
     echo "===== git_locate install finished $(date -u +%FT%TZ) ====="
     return 0
   fi
@@ -440,7 +488,12 @@ main() {
     log "--core-only: skipping external tool installation"
   fi
   print_summary
+  verify_install
   echo "===== git_locate install finished $(date -u +%FT%TZ) ====="
 }
 
 main
+# Ensure the tee'd transcript is fully flushed before we exit (otherwise the
+# final verification lines — the most useful ones — can be truncated).
+exec 1>&- 2>&- || true
+wait 2>/dev/null || true
