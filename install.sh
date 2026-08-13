@@ -17,10 +17,16 @@
 #
 # Usage:
 #   ./install.sh                # install everything (default)
+#   ./install.sh trufflehog     # install ONLY the named tool(s) and exit
+#   ./install.sh gitleaks trufflehog
 #   ./install.sh --core-only    # only git_locate + Python deps
 #   ./install.sh --skip-apt     # skip apt (deps already present)
 #   ./install.sh --skip-go-tools
 #   ./install.sh --skip-py-tools
+#
+# trufflehog and gitleaks install from official prebuilt binaries (no Go build
+# needed) and fall back to `go install`. Go-installed binaries are relocated to
+# ${GOBIN_DIR} so they are always on PATH (fixes "installed but not found").
 #
 # External-tool installs are best-effort: a failure is logged and the
 # script continues so the git_locate core always ends up working.
@@ -38,6 +44,7 @@ CORE_ONLY=0
 SKIP_APT=0
 SKIP_GO_TOOLS=0
 SKIP_PY_TOOLS=0
+ONLY_TOOLS=()          # bare tool names => install just those and exit
 for arg in "$@"; do
   case "$arg" in
     --core-only) CORE_ONLY=1 ;;
@@ -45,7 +52,9 @@ for arg in "$@"; do
     --skip-go-tools) SKIP_GO_TOOLS=1 ;;
     --skip-py-tools) SKIP_PY_TOOLS=1 ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    --*) echo "Unknown option: $arg" >&2; exit 2 ;;
+    # A bare word (e.g. `install.sh trufflehog`) installs only that tool.
+    *) ONLY_TOOLS+=("$arg") ;;
   esac
 done
 
@@ -141,29 +150,114 @@ install_go() {
   have go && log "Using $(go version)"
 }
 
-# Install a Go tool with binaries dropped into a PATH dir.
+# Locate a just-built Go binary wherever the toolchain dropped it and make sure
+# it ends up on PATH in GOBIN_DIR. This fixes the common "installed but not
+# where the tool expects it" case (binary in ~/go/bin, not /usr/local/bin).
+_relocate_go_bin() {
+  local name="$1" d found=""
+  have "$name" && return 0
+  for d in "$GOBIN_DIR" "$(go env GOBIN 2>/dev/null)" "$(go env GOPATH 2>/dev/null)/bin" \
+           "$HOME/go/bin" "/root/go/bin" "$HOME/.local/bin"; do
+    [ -n "$d" ] && [ -x "$d/$name" ] && { found="$d/$name"; break; }
+  done
+  [ -n "$found" ] || return 1
+  run_priv install -m 0755 "$found" "${GOBIN_DIR}/${name}"
+}
+
+# Install a Go tool. Full build output goes to the log (not swallowed) so a
+# build failure is diagnosable, and the binary is relocated onto PATH.
 go_install() {
   local name="$1" module="$2"
   have go || { warn "Go unavailable; cannot install $name"; return 1; }
   log "go install $name ($module)"
-  # GOBIN must be an absolute dir we can write to.
   if [ -w "$GOBIN_DIR" ]; then
-    GOBIN="$GOBIN_DIR" GOFLAGS="-buildvcs=false" go install "$module" 2>&1 | tail -n 3
+    GOBIN="$GOBIN_DIR" GOFLAGS="-buildvcs=false" GOTOOLCHAIN=auto go install "$module"
   else
-    # Build into GOPATH/bin then move with privileges.
-    GOFLAGS="-buildvcs=false" go install "$module" 2>&1 | tail -n 3
-    local gobin; gobin="$(go env GOPATH)/bin/${name}"
-    [ -f "$gobin" ] && run_priv install -m 0755 "$gobin" "${GOBIN_DIR}/${name}"
+    GOFLAGS="-buildvcs=false" GOTOOLCHAIN=auto go install "$module"
   fi
-  have "$name" && log "installed: $(command -v "$name")" || warn "$name not on PATH after install"
+  local rc=$?
+  _relocate_go_bin "$name" || true
+  if have "$name"; then
+    log "installed: $(command -v "$name")"; return 0
+  fi
+  warn "$name not found after go install (go rc=$rc); see $INSTALL_LOG"
+  return 1
+}
+
+# GitHub API GET with the token applied when present (raises the 60/hr limit).
+_gh_curl() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$@"
+  else
+    curl -sSfL "$@"
+  fi
+}
+
+_latest_release_tag() {  # $1 = owner/repo
+  local json; json="$(_gh_curl "https://api.github.com/repos/$1/releases/latest" 2>/dev/null)" || return 1
+  if have jq; then
+    printf '%s' "$json" | jq -r '.tag_name // empty'
+  else
+    printf '%s' "$json" | grep -oE '"tag_name"[^,]*' | head -1 | cut -d'"' -f4
+  fi
+}
+
+_deb_arch() {  # map uname -m to common release-asset arch tokens
+  case "$(uname -m)" in
+    x86_64|amd64) echo "x64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    armv7l) echo "armv7" ;;
+    *) echo "x64" ;;
+  esac
+}
+
+# trufflehog: official binary installer (no Go build). This is the reliable
+# path and the one you want since trufflehog is your primary scanner.
+install_trufflehog() {
+  if have trufflehog; then log "trufflehog present: $(command -v trufflehog)"; return 0; fi
+  log "Installing trufflehog via official binary installer -> ${GOBIN_DIR}"
+  if curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+       | run_priv sh -s -- -b "$GOBIN_DIR"; then
+    have trufflehog && { log "trufflehog installed: $(command -v trufflehog) ($(trufflehog --version 2>&1 | head -1))"; return 0; }
+  fi
+  warn "trufflehog binary installer failed; falling back to go install"
+  go_install trufflehog github.com/trufflesecurity/trufflehog/v3@latest
+}
+
+# gitleaks: official release tarball (no Go build), fallback to go install.
+install_gitleaks() {
+  if have gitleaks; then log "gitleaks present: $(command -v gitleaks)"; return 0; fi
+  local arch tag ver url tmp
+  arch="$(_deb_arch)"
+  tag="$(_latest_release_tag gitleaks/gitleaks)"
+  if [ -n "$tag" ]; then
+    ver="${tag#v}"
+    url="https://github.com/gitleaks/gitleaks/releases/download/${tag}/gitleaks_${ver}_linux_${arch}.tar.gz"
+    log "Installing gitleaks ${tag} from ${url}"
+    tmp="$(mktemp -d)"
+    if curl -sSfL "$url" -o "${tmp}/gitleaks.tar.gz" \
+         && tar -C "$tmp" -xzf "${tmp}/gitleaks.tar.gz" gitleaks 2>/dev/null; then
+      run_priv install -m 0755 "${tmp}/gitleaks" "${GOBIN_DIR}/gitleaks"
+      rm -rf "$tmp"
+      have gitleaks && { log "gitleaks installed: $(command -v gitleaks)"; return 0; }
+    fi
+    rm -rf "$tmp"
+    warn "gitleaks release download failed"
+  else
+    warn "could not resolve latest gitleaks release tag"
+  fi
+  warn "falling back to go install for gitleaks"
+  go_install gitleaks github.com/gitleaks/gitleaks/v8@latest
 }
 
 install_go_tools() {
-  [ "$SKIP_GO_TOOLS" -eq 1 ] && { warn "skipping go tools (per --skip-go-tools)"; return 0; }
+  [ "$SKIP_GO_TOOLS" -eq 1 ] && { warn "skipping go/binary tools (per --skip-go-tools)"; return 0; }
+  # Binary-first tools (work even if Go is missing/old):
+  try "trufflehog"        install_trufflehog
+  try "gitleaks"          install_gitleaks
+  # Go-built tools:
   try "notify"            go_install notify            github.com/projectdiscovery/notify/cmd/notify@latest
   try "github-subdomains" go_install github-subdomains github.com/gwen001/github-subdomains@latest
-  try "gitleaks"          go_install gitleaks          github.com/gitleaks/gitleaks/v8@latest
-  try "trufflehog"        go_install trufflehog        github.com/trufflesecurity/trufflehog/v3@latest
 }
 
 # ---- 3. git_locate core (Python) ------------------------------------
@@ -219,11 +313,41 @@ install_credsweeper() {
 install_git_wild_hunt() {
   local dest="${OPT_DIR}/git-wild-hunt"
   clone_or_update https://github.com/josehelps/git-wild-hunt "$dest" || return 1
-  have go || { warn "Go unavailable; cannot build git-wild-hunt"; return 1; }
-  ( cd "$dest" && GOFLAGS="-buildvcs=false" run_priv env "PATH=$PATH" go build -o git-wild-hunt . ) \
-    || { warn "git-wild-hunt build failed"; return 1; }
-  run_priv ln -sf "${dest}/git-wild-hunt" "${GOBIN_DIR}/git-wild-hunt"
-  log "git-wild-hunt built at ${dest} (needs a config.yaml with dorks + token)"
+  # Own the clone so we can build without sudo on every go/pip call.
+  run_priv chown -R "$(id -u):$(id -g)" "$dest" 2>/dev/null || true
+
+  if ls "$dest"/*.go >/dev/null 2>&1; then
+    # Go project — may predate modules (no go.mod), so bootstrap one.
+    have go || { warn "Go unavailable; cannot build git-wild-hunt"; return 1; }
+    ( cd "$dest"
+      if [ ! -f go.mod ]; then
+        log "git-wild-hunt has no go.mod; bootstrapping a module"
+        GOFLAGS="-buildvcs=false" go mod init git-wild-hunt 2>/dev/null || true
+        GOFLAGS="-buildvcs=false -mod=mod" go mod tidy 2>/dev/null || true
+      fi
+      GOFLAGS="-buildvcs=false -mod=mod" go build -o git-wild-hunt . ) \
+      || { warn "git-wild-hunt go build failed; see $INSTALL_LOG"; return 1; }
+    run_priv ln -sf "${dest}/git-wild-hunt" "${GOBIN_DIR}/git-wild-hunt"
+    log "git-wild-hunt built (Go) at ${dest} (needs a config.yaml with dorks + token)"
+
+  elif [ -f "$dest/requirements.txt" ] || ls "$dest"/*.py >/dev/null 2>&1; then
+    # Python project — set up an isolated venv + a PATH wrapper.
+    python3 -m venv "${dest}/.venv" || return 1
+    "${dest}/.venv/bin/pip" install --upgrade pip >/dev/null
+    [ -f "$dest/requirements.txt" ] && \
+      "${dest}/.venv/bin/pip" install -r "$dest/requirements.txt" >/dev/null
+    local main="$dest/git-wild-hunt.py"
+    [ -f "$main" ] || main="$(ls "$dest"/*.py 2>/dev/null | head -1)"
+    [ -n "$main" ] || { warn "git-wild-hunt: no entry .py found"; return 1; }
+    printf '#!/usr/bin/env bash\nexec %s/.venv/bin/python %s "$@"\n' "$dest" "$main" \
+      | run_priv tee "${GOBIN_DIR}/git-wild-hunt" >/dev/null
+    run_priv chmod +x "${GOBIN_DIR}/git-wild-hunt"
+    log "git-wild-hunt installed (Python) at ${dest}"
+
+  else
+    warn "git-wild-hunt: unrecognized project layout (neither Go nor Python)"
+    return 1
+  fi
 }
 
 install_py_tools() {
@@ -234,13 +358,32 @@ install_py_tools() {
 }
 
 # ---- summary --------------------------------------------------------
+# One-line manual install command for tools that failed automatically.
+_manual_hint() {
+  case "$1" in
+    trufflehog) echo "curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sudo sh -s -- -b ${GOBIN_DIR}" ;;
+    gitleaks)   echo "download from https://github.com/gitleaks/gitleaks/releases and copy the 'gitleaks' binary to ${GOBIN_DIR}" ;;
+    notify)     echo "GOBIN=${GOBIN_DIR} go install github.com/projectdiscovery/notify/cmd/notify@latest" ;;
+    github-subdomains) echo "GOBIN=${GOBIN_DIR} go install github.com/gwen001/github-subdomains@latest" ;;
+    credsweeper) echo "pipx install credsweeper  (or pip install credsweeper in a venv)" ;;
+    gitdorker)  echo "git clone https://github.com/obheda12/GitDorker ${OPT_DIR}/GitDorker && pip install -r ${OPT_DIR}/GitDorker/requirements.txt" ;;
+    git-wild-hunt) echo "git clone https://github.com/josehelps/git-wild-hunt ${OPT_DIR}/git-wild-hunt  (then build per its README)" ;;
+  esac
+}
+
 print_summary() {
   echo
   log "Installation summary:"
-  for t in gitleaks trufflehog notify github-subdomains gitdorker credsweeper git-wild-hunt; do
+  local missing=()
+  for t in trufflehog gitleaks notify github-subdomains gitdorker credsweeper git-wild-hunt; do
     if have "$t"; then echo -e "    ${c_green}ok${c_reset}   $t -> $(command -v "$t")";
-    else echo -e "    ${c_yellow}--${c_reset}   $t (not installed)"; fi
+    else echo -e "    ${c_yellow}--${c_reset}   $t (not installed)"; missing+=("$t"); fi
   done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo
+    warn "Some tools did not install. Manual commands (also check ${INSTALL_LOG}):"
+    for t in "${missing[@]}"; do echo "    $t: $(_manual_hint "$t")"; done
+  fi
   cat <<EOF
 
 Next steps:
@@ -261,9 +404,32 @@ Reminder: use git_locate ONLY against targets you are authorized to test.
 EOF
 }
 
+# Install a single named tool (for `install.sh <tool>` targeted re-runs).
+run_named_tool() {
+  case "$1" in
+    trufflehog)         install_trufflehog ;;
+    gitleaks)           install_gitleaks ;;
+    notify)             install_go; go_install notify github.com/projectdiscovery/notify/cmd/notify@latest ;;
+    github-subdomains)  install_go; go_install github-subdomains github.com/gwen001/github-subdomains@latest ;;
+    gitdorker|GitDorker) install_gitdorker ;;
+    credsweeper|CredSweeper) install_credsweeper ;;
+    git-wild-hunt)      install_go; install_git_wild_hunt ;;
+    *) err "unknown tool '$1' (valid: trufflehog gitleaks notify github-subdomains gitdorker credsweeper git-wild-hunt)"; return 2 ;;
+  esac
+}
+
 # ---- main -----------------------------------------------------------
 main() {
   banner
+  # Targeted mode: `install.sh trufflehog [gitleaks ...]` installs just those.
+  if [ "${#ONLY_TOOLS[@]}" -gt 0 ]; then
+    log "Targeted install: ${ONLY_TOOLS[*]}"
+    for t in "${ONLY_TOOLS[@]}"; do try "$t" run_named_tool "$t"; done
+    print_summary
+    echo "===== git_locate install finished $(date -u +%FT%TZ) ====="
+    return 0
+  fi
+
   install_apt
   install_core || { err "core install failed"; exit 1; }
   if [ "$CORE_ONLY" -eq 0 ]; then

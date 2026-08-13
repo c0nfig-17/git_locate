@@ -78,6 +78,18 @@ Options: `--core-only` (just `git_locate` + Python deps), `--skip-apt`,
 `--skip-go-tools`, `--skip-py-tools`. External-tool installs are best-effort —
 a failure is logged and the core install still completes.
 
+**Re-install a single tool** (e.g. if one failed) by naming it:
+
+```bash
+./install.sh trufflehog            # install just trufflehog
+./install.sh gitleaks trufflehog   # or several
+```
+
+`trufflehog` and `gitleaks` install from official **prebuilt binaries** (no Go
+build), falling back to `go install`. Any Go-built binary is relocated to
+`/usr/local/bin` so it is always on `PATH`. The full transcript is written to
+`install.log`.
+
 Installed external tools: [`notify`](https://github.com/projectdiscovery/notify),
 [`github-subdomains`](https://github.com/gwen001/github-subdomains),
 [`gitleaks`](https://github.com/gitleaks/gitleaks),
