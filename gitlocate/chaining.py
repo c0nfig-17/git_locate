@@ -68,6 +68,16 @@ class Chainer:
             log.info("Chaining enabled but no commands configured; nothing to run.")
             return stats
 
+        # Commands that interpolate {clone_dir} need a working tree. Warn once,
+        # up front, if clone is off — otherwise each would run with an empty
+        # path (e.g. 'gitleaks detect --source ') and fail cryptically.
+        needs_clone = [c for c in self.commands if "{clone_dir}" in c]
+        if needs_clone and not self.clone:
+            log.warning("%d chaining command(s) use {clone_dir} but "
+                        "chaining.clone is false — they will be SKIPPED. Set "
+                        "chaining.clone: true to clone each repo first.",
+                        len(needs_clone))
+
         os.makedirs(self.workdir, exist_ok=True)
         repos = [e for e in findings.of_kind(KIND_REPO) if e.confidence >= self.min_conf]
         for entity in repos:
@@ -80,6 +90,11 @@ class Chainer:
                     clone_dir = ""
             ph = _placeholders(entity, clone_dir, self.workdir)
             for template in self.commands:
+                # Never run a {clone_dir} command without a clone: an empty
+                # --source/--path either errors or silently scans the cwd.
+                if "{clone_dir}" in template and not clone_dir:
+                    stats["skipped"] += 1
+                    continue
                 cmd = template
                 for key, val in ph.items():
                     cmd = cmd.replace("{" + key + "}", val)

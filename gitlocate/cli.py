@@ -52,6 +52,25 @@ def _merge(*groups: List[str]) -> List[str]:
     return _dedupe(out)
 
 
+def _check_notify_config(config) -> int:
+    """Validate Notify's provider config and report. 0 = usable, 1 = problems."""
+    path, explicit = notify_mod.resolve_provider_config(config)
+    source = "configured" if explicit else "Notify default location"
+    log.info("Checking Notify provider config (%s): %s", source, path)
+    problems = notify_mod.check_provider_config(path, require_exists=explicit)
+    if problems:
+        for line in problems:
+            log.error("%s", line)
+        return 1
+    if not os.path.exists(path):
+        log.warning("No Notify provider config at %s — set %s or "
+                    "notify.provider_config before sending.", path,
+                    config.get("notify.provider_config_env", "NOTIFY_PROVIDER_CONFIG"))
+        return 0
+    log.info("Notify provider config parses cleanly (no duplicate keys).")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gitlocate",
@@ -85,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="For chaining: print commands instead of executing them.")
     p.add_argument("--print-config", action="store_true",
                    help="Print the effective merged configuration and exit.")
+    p.add_argument("--check-notify-config", action="store_true",
+                   help="Validate the Notify provider-config YAML (duplicate "
+                        "keys, syntax) and exit.")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="Increase console log verbosity (-v, -vv).")
     p.add_argument("-q", "--quiet", action="store_true", help="Only log warnings/errors.")
@@ -124,6 +146,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         import json
         print(json.dumps(config.data, indent=2, default=str))
         return 0
+
+    if args.check_notify_config:
+        return _check_notify_config(config)
 
     # -- attach the debug log file + write the diagnostic header ----------
     log_path = None
