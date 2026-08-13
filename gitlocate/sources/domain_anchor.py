@@ -17,6 +17,16 @@ from urllib.parse import urlparse
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
+# Common two-level public suffixes so "acme.co.uk" -> label "acme", not "co".
+_TWO_LEVEL_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "org.nz",
+    "co.jp", "or.jp", "ne.jp", "com.br", "net.br", "com.mx", "com.ar",
+    "co.in", "net.in", "org.in", "co.za", "com.sg", "com.hk", "com.tr",
+    "com.cn", "net.cn", "org.cn", "co.kr", "com.es", "com.pl",
+}
+
+
 def normalize_domain(value: Optional[str]) -> Optional[str]:
     """Reduce an input to a bare, lowercased registrable-ish hostname."""
     if not value:
@@ -59,6 +69,35 @@ def prepare_targets(domains: Iterable[str]) -> Set[str]:
         nd = normalize_domain(d)
         if nd:
             out.add(nd)
+    return out
+
+
+def registrable_label(domain: Optional[str]) -> Optional[str]:
+    """Return the registrable label of a domain WITHOUT its TLD.
+
+    ``acme.com`` -> ``acme``; ``shop.acme.co.uk`` -> ``acme``; a bare label
+    (``acme``) is returned as-is. This is the "domain without TLD" form used as
+    a name/search seed.
+    """
+    host = normalize_domain(domain)
+    if not host:
+        return None
+    parts = host.split(".")
+    if len(parts) < 2:
+        return host
+    last_two = ".".join(parts[-2:])
+    if last_two in _TWO_LEVEL_SUFFIXES and len(parts) >= 3:
+        return parts[-3]
+    return parts[-2]
+
+
+def domain_seed_labels(domains: Iterable[str]) -> List[str]:
+    """De-duplicated registrable labels for a set of domains (order-stable)."""
+    out: List[str] = []
+    for d in domains:
+        lbl = registrable_label(d)
+        if lbl and lbl not in out:
+            out.append(lbl)
     return out
 
 

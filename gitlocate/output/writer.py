@@ -82,6 +82,9 @@ def build_notify_text(document: Dict, payload: str = "summary") -> str:
     if payload == "json":
         return json.dumps(document, ensure_ascii=False)
 
+    if payload == "phase_transition":
+        return _build_phase_transition(document)
+
     # default: summary
     tgt = document.get("targets", {})
     summary = document.get("summary", {})
@@ -109,6 +112,31 @@ def build_notify_text(document: Dict, payload: str = "summary") -> str:
     _top(document.get("organizations", []), "orgs")
     _top(document.get("repositories", []), "repos")
     _top(document.get("users", []), "users")
+    return "\n".join(lines)
+
+
+def _build_phase_transition(document: Dict) -> str:
+    """Message announcing enumeration (phase 1) done -> leak discovery (phase 2)."""
+    tgt = document.get("targets", {})
+    summary = document.get("summary", {})
+    n_repos = summary.get("repositories", 0)
+    companies = ", ".join(tgt.get("companies", [])) or "-"
+    domains = ", ".join(tgt.get("domains", [])) or "-"
+    lines: List[str] = [
+        f"[{document['tool']}] Phase 1 (enumeration) complete -> starting Phase 2 "
+        f"(leak discovery)",
+        f"targets: {companies} | domains: {domains}",
+        "enumerated: {o} orgs, {r} repos, {u} users".format(
+            o=summary.get("organizations", 0),
+            r=n_repos,
+            u=summary.get("users", 0),
+        ),
+        f"{n_repos} repositories queued for scanning.",
+    ]
+    for e in document.get("repositories", [])[:10]:
+        lines.append(f"  - {e['id']} ({e['confidence']:.2f}) {e['url']}")
+    if n_repos > 10:
+        lines.append(f"  ... and {n_repos - 10} more (see results.json / repos.txt)")
     return "\n".join(lines)
 
 

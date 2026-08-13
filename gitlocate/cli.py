@@ -22,6 +22,17 @@ def _read_lines(path: str) -> List[str]:
         return [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
 
 
+def _dedupe(items: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for item in items:
+        item = item.strip()
+        if item and item.lower() not in seen:
+            seen.add(item.lower())
+            result.append(item)
+    return result
+
+
 def _collect(values: Optional[List[str]], file_path: Optional[str]) -> List[str]:
     out: List[str] = []
     for v in values or []:
@@ -29,14 +40,15 @@ def _collect(values: Optional[List[str]], file_path: Optional[str]) -> List[str]
         out.extend(part.strip() for part in v.split(",") if part.strip())
     if file_path:
         out.extend(_read_lines(file_path))
-    # de-duplicate, order-stable
-    seen = set()
-    result = []
-    for item in out:
-        if item.lower() not in seen:
-            seen.add(item.lower())
-            result.append(item)
-    return result
+    return _dedupe(out)
+
+
+def _merge(*groups: List[str]) -> List[str]:
+    """De-duplicated, order-stable merge of several string lists."""
+    out: List[str] = []
+    for g in groups:
+        out.extend(g or [])
+    return _dedupe(out)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,12 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-c", "--company", action="append", metavar="NAME",
                    help="Company name (repeatable, or comma-separated).")
-    p.add_argument("--company-file", metavar="PATH",
-                   help="File with one company name per line.")
+    p.add_argument("--company-file", "--companies", metavar="PATH",
+                   help="File with one company name per line (the usual input).")
     p.add_argument("-d", "--domain", action="append", metavar="DOMAIN",
                    help="Associated domain (repeatable, or comma-separated).")
-    p.add_argument("--domain-file", metavar="PATH",
-                   help="File with one domain per line.")
+    p.add_argument("--domain-file", "--domains", metavar="PATH",
+                   help="File with one domain per line (the usual input).")
     p.add_argument("--config", metavar="PATH",
                    help="Config YAML (default: $GITLOCATE_CONFIG or ./config.yaml).")
     p.add_argument("-o", "--output-dir", metavar="DIR",
@@ -116,11 +128,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(config.data, indent=2, default=str))
         return 0
 
-    companies = _collect(args.company, args.company_file)
-    domains = _collect(args.domain, args.domain_file)
+    # Targets: CLI flags + files + a `targets:` block in the config file.
+    companies = _collect(
+        args.company, args.company_file or config.get("targets.companies_file"))
+    companies = _merge(config.get("targets.companies") or [], companies)
+    domains = _collect(
+        args.domain, args.domain_file or config.get("targets.domains_file"))
+    domains = _merge(config.get("targets.domains") or [], domains)
 
     if not companies:
-        log.error("At least one company name is required (-c/--company or --company-file).")
+        log.error("At least one company name is required "
+                  "(-c/--company, --company-file, or targets.companies in config).")
         return 2
     if not domains:
         log.warning("No domains supplied: domain-anchor verification will be skipped, "
@@ -128,6 +146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     log.info("Targets: companies=%s domains=%s", companies, domains)
 
+    # ============================ PHASE 1: enumeration =====================
+    log.info("=== Phase 1: enumeration (discovery) ===")
     engine = Engine(config)
     findings = engine.run(companies, domains)
 
@@ -144,29 +164,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     writer.write_json(document, json_path, pretty=pretty)
     writer.write_repos_flat(findings, repos_path)
 
-    notify_payload = config.get("notify.payload", "summary")
+    notify_payload = config.get("notify.payload", "phase_transition")
     notify_text = writer.build_notify_text(document, payload=notify_payload)
     writer.write_notify_text(notify_text, notify_path)
 
     summary = document["summary"]
-    log.info("Discovery complete: %d orgs, %d repos, %d users",
+    log.info("Phase 1 complete: %d orgs, %d repos, %d users",
              summary["organizations"], summary["repositories"], summary["users"])
     log.info("Wrote %s, %s, %s", json_path, repos_path, notify_path)
 
-    # -- optional: Notify -------------------------------------------------
-    if args.notify or config.get("notify.enabled", False):
+    # ---- Phase transition notification (1 -> 2) -------------------------
+    # Notify fires here, at the boundary between enumeration and leak
+    # discovery, so you know phase 2 is about to run over the discovered repos.
+    want_notify = args.notify or config.get("notify.enabled", False) \
+        or config.get("notify.on_phase_transition", False)
+    if want_notify:
         if notify_mod.send(config, notify_text):
-            log.info("Results sent to Notify.")
+            log.info("Phase-transition notification sent to Notify.")
         else:
             log.warning("Notify send did not complete (see warnings above).")
 
-    # -- optional: chaining -----------------------------------------------
+    # ======================= PHASE 2: leak discovery =======================
+    # Runs the configured external tools (gitleaks, trufflehog, ...) per repo.
+    # Phase 3 (per-leak notification) is handled by those tools' own configs
+    # (e.g. piping their findings into `notify`).
     if args.chain or config.get("chaining.enabled", False):
+        log.info("=== Phase 2: leak discovery (chaining) ===")
         chainer = Chainer(config, dry_run=args.dry_run)
         stats = chainer.run(findings)
         log.info("Chaining: %d repos, %d commands run, %d failures, %d skipped",
                  stats["repos"], stats["commands_run"], stats["failures"],
                  stats["skipped"])
+    else:
+        log.info("Phase 2 (leak discovery) not run. Enable with --chain or "
+                 "chaining.enabled, after pasting your tools into config.yaml.")
 
     # Emit the JSON path on stdout for easy piping in shell pipelines.
     print(json_path)

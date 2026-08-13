@@ -24,6 +24,13 @@ except Exception:  # pragma: no cover - dependency missing
 
 
 DEFAULTS: Dict[str, Any] = {
+    # Targets can be supplied on the CLI, from files, OR right here in config.
+    "targets": {
+        "companies": [],
+        "domains": [],
+        "companies_file": "",
+        "domains_file": "",
+    },
     "github": {
         "token_env": "GITHUB_TOKEN",
         "api_url": "https://api.github.com",
@@ -34,6 +41,8 @@ DEFAULTS: Dict[str, Any] = {
         "fetch_profiles": True,          # pull blog/email for domain anchoring
         "fetch_commit_emails": False,    # expensive; off by default
         "commit_sample": 20,
+        "search_by_domain": True,        # search repos/accounts by the domain
+        "search_email": True,            # search accounts with in:email <domain>
         "search_in": {
             "orgs": ["login", "name", "email"],
             "repos": ["name", "description", "readme"],
@@ -44,16 +53,32 @@ DEFAULTS: Dict[str, Any] = {
         "discover_repos": True,
         "discover_users": True,
     },
+    # Graph expansion: pivot from confirmed nodes to discover related ones.
+    "expansion": {
+        "enabled": True,
+        "max_depth": 2,                  # BFS hops from the seed nodes
+        "max_nodes": 400,                # global cap on pivoted nodes
+        "pivot_min_confidence": 0.3,     # pivot from nodes at/above this
+                                         # (0.3 = an exact name match qualifies)
+        "org_members": True,             # org  -> public members (users)
+        "user_orgs": True,               # user -> public orgs
+        "repo_contributors": False,      # repo -> contributors (noisy; opt-in)
+        "per_owner_limit": 100,          # cap members/orgs fetched per node
+    },
     "web_dork": {
-        "enabled": True,             # only actually runs if the API key exists
-        "provider": "serper",
-        "api_key_env": "SERPER_API_KEY",
+        # Keyless by default: DuckDuckGo needs no API key. 'serper' is optional.
+        "enabled": True,
+        "provider": "duckduckgo",        # duckduckgo | serper
+        "duckduckgo_endpoint": "https://html.duckduckgo.com/html/",
+        "api_key_env": "SERPER_API_KEY",     # used only by the serper provider
         "endpoint": "https://google.serper.dev/search",
         "num": 20,
+        "use_variants": False,           # query human names only (low volume)
+        "max_queries": 12,               # hard cap on web requests per run
+        "delay_seconds": 1.0,            # politeness delay between web requests
         "queries": [
             "site:github.com {name}",
-            'site:github.com "{name}"',
-            '"{name}" github organization',
+            '"{name}" github',
         ],
     },
     "variants": {
@@ -73,6 +98,9 @@ DEFAULTS: Dict[str, Any] = {
             "web_dork": 0.15,
             "owner_confirmed": 0.25,
             "commit_email_domain": 0.3,
+            "domain_search": 0.15,
+            "org_member": 0.2,
+            "related": 0.1,
         },
         "min_confidence": 0.0,
     },
@@ -120,7 +148,10 @@ DEFAULTS: Dict[str, Any] = {
         "provider_config": "",       # optional explicit path; env var wins
         "provider_id": "",           # notify -id value (e.g. "recon")
         "bulk": True,
-        "payload": "summary",        # summary | repos | json
+        "payload": "phase_transition",  # phase_transition | summary | repos | json
+        # Fire a Notify message when enumeration (phase 1) completes and the
+        # leak-discovery stage (phase 2) is about to begin.
+        "on_phase_transition": True,
     },
 }
 

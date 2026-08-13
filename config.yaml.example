@@ -9,9 +9,19 @@
 # runtime. Set them before running, e.g.:
 #
 #   export GITHUB_TOKEN=ghp_xxx           # GitHub API token (recommended)
-#   export SERPER_API_KEY=xxx             # optional, enables web dorking
+#   export SERPER_API_KEY=xxx             # ONLY if you switch web_dork to serper
 #   export NOTIFY_PROVIDER_CONFIG=~/.config/notify/provider-config.yaml
 # =====================================================================
+
+# --------------------------------------------------------------------
+# Targets. You can pass these on the CLI (-c/-d, --company-file/--domain-file)
+# OR list them here. CLI + files + these are merged and de-duplicated.
+# --------------------------------------------------------------------
+targets:
+  companies: []            # e.g. ["Acme Corp", "Acme Labs"]
+  domains: []              # e.g. ["acme.com", "acme.io"]
+  companies_file: ""       # path to a file, one company per line
+  domains_file: ""         # path to a file, one domain per line
 
 github:
   token_env: GITHUB_TOKEN          # env var holding the GitHub token
@@ -23,6 +33,8 @@ github:
   fetch_profiles: true             # pull blog/email to anchor on domains
   fetch_commit_emails: false       # sample commit emails (slower, stronger)
   commit_sample: 20
+  search_by_domain: true           # search repos/accounts by the domain string
+  search_email: true               # search accounts with in:email <domain>
   discover_orgs: true
   discover_repos: true
   discover_users: true
@@ -32,23 +44,47 @@ github:
     users: [login, name, email]
 
 # --------------------------------------------------------------------
-# Pluggable web-dorking source. OPTIONAL — only runs when the API key
-# named in api_key_env is present in the environment. Without it, the
-# tool works with the GitHub API alone and does not break.
+# Graph expansion: pivot from confirmed nodes to discover related assets.
+#   org  -> public members (users)
+#   user -> public organizations
+#   repo -> contributors (optional; noisier)
+# Bounded by depth, a global node cap, and a per-node fan-out cap.
+# --------------------------------------------------------------------
+expansion:
+  enabled: true
+  max_depth: 2                     # BFS hops from the seed nodes
+  max_nodes: 400                   # global cap on pivoted nodes
+  pivot_min_confidence: 0.3        # pivot from nodes at/above this score
+  org_members: true
+  user_orgs: true
+  repo_contributors: false         # opt-in (can be noisy/expensive)
+  per_owner_limit: 100
+
+# --------------------------------------------------------------------
+# Web-search ("dorking") source. Locates the official org the way a human
+# would Google it. KEYLESS by default (DuckDuckGo) — no API account needed.
+# Low volume on purpose: human names only, capped request count.
 # --------------------------------------------------------------------
 web_dork:
   enabled: true
-  provider: serper                 # currently supported: serper
+  provider: duckduckgo             # duckduckgo (keyless) | serper (needs key)
+  duckduckgo_endpoint: https://html.duckduckgo.com/html/
+  # -- only used when provider: serper --
   api_key_env: SERPER_API_KEY
   endpoint: https://google.serper.dev/search
   num: 20
+  # -- shared --
+  use_variants: false              # false = query the human company names only
+  max_queries: 12                  # hard cap on web requests per run
+  delay_seconds: 1.0               # politeness delay between web requests
   queries:
     - "site:github.com {name}"
-    - 'site:github.com "{name}"'
-    - '"{name}" github organization'
+    - '"{name}" github'
 
 # --------------------------------------------------------------------
-# Name -> search-variant generation.
+# Name -> search-variant generation. The registrable label of each domain
+# (acme.com -> "acme") is added automatically as an extra name seed, so
+# domains are useful WITH and WITHOUT their TLD.
 # --------------------------------------------------------------------
 variants:
   separators: ["", " ", "-", "_"]
@@ -59,7 +95,7 @@ variants:
   max_total_variants: 120
 
 # --------------------------------------------------------------------
-# Confidence scoring (weights sum is clamped to 1.0 per entity).
+# Confidence scoring (per-entity sum clamped to 1.0).
 # --------------------------------------------------------------------
 scoring:
   weights:
@@ -70,10 +106,14 @@ scoring:
     web_dork: 0.15                 # surfaced by web dorking
     owner_confirmed: 0.25          # (repos) owner is a confirmed org/user
     commit_email_domain: 0.3       # sampled commit email hits a target domain
+    domain_search: 0.15            # found by searching the target domain string
+    org_member: 0.2                # public member of a confirmed org
+    related: 0.1                   # other pivot relation (user's org, contributor)
   min_confidence: 0.0              # drop entities scoring below this
 
 # --------------------------------------------------------------------
-# GitHub rate-limit handling: automatic waits until reset.
+# GitHub rate-limit handling: automatic waits until reset (only on genuine
+# rate-limit responses; a plain 403 returns immediately).
 # --------------------------------------------------------------------
 rate_limit:
   auto_wait: true
@@ -92,7 +132,7 @@ output:
   pretty: true
 
 # ====================================================================
-# Tool chaining — run external tools on every discovered repo.
+# PHASE 2 — tool chaining: run external leak/recon tools per discovered repo.
 # ====================================================================
 chaining:
   enabled: false                   # or pass --chain on the CLI
@@ -120,12 +160,16 @@ chaining:
 
 # --------------------------------------------------------------------
 # ProjectDiscovery Notify integration (webhook fan-out).
+# By default a Notify message fires at the PHASE 1 -> PHASE 2 boundary
+# (enumeration done, leak discovery starting). Phase 3 (per-leak alerts) is
+# done by the chaining tools piping their own findings into `notify`.
 # --------------------------------------------------------------------
 notify:
-  enabled: false                   # or pass --notify on the CLI
+  enabled: false                   # force-send regardless of phase
+  on_phase_transition: true        # send when phase 1 -> phase 2
   binary: notify
   provider_config_env: NOTIFY_PROVIDER_CONFIG   # path to notify's provider yaml
   provider_config: ""              # optional explicit path (env var wins)
   provider_id: ""                  # notify -id value, e.g. "recon"
   bulk: true
-  payload: summary                 # summary | repos | json
+  payload: phase_transition        # phase_transition | summary | repos | json

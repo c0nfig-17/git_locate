@@ -59,6 +59,9 @@ class Scorer:
             "web_dork": float(w.get("web_dork", 0.15)),
             "owner_confirmed": float(w.get("owner_confirmed", 0.25)),
             "commit_email_domain": float(w.get("commit_email_domain", 0.3)),
+            "domain_search": float(w.get("domain_search", 0.15)),
+            "org_member": float(w.get("org_member", 0.2)),
+            "related": float(w.get("related", 0.1)),
         }
         self.min_confidence = float(config.get("scoring.min_confidence", 0.0))
         self.owner_min = float(config.get("github.owner_repo_min_confidence", 0.4))
@@ -84,6 +87,17 @@ class Scorer:
 
         if SOURCE_WEB_DORK in entity.sources:
             signals["web_dork"] = self.w["web_dork"]
+
+        # Found by searching the target domain string itself.
+        if entity.extra.get("domain_search"):
+            signals["domain_search"] = self.w["domain_search"]
+
+        # Pivot signals: being a public member of a confirmed org is meaningful;
+        # other graph relations (a confirmed user's org, a contributor) less so.
+        if entity.extra.get("org_member"):
+            signals["org_member"] = self.w["org_member"]
+        elif entity.extra.get("related"):
+            signals["related"] = self.w["related"]
 
         if entity.kind == KIND_REPO:
             owner = (entity.extra.get("owner_login") or "").lower()

@@ -15,24 +15,48 @@ external tools you wire into the [chaining](#tool-chaining) section.
 
 ## What it does
 
-- **Name-variant generation** — from a company name it derives the many spellings
-  a login might use: joined, spaced, hyphenated, underscored, individual words,
-  word bi-grams, and common suffixes (`inc`, `labs`, `io`, `hq`, `dev`, …).
-- **Three discovery sources**, combined and prioritized **orgs → repos → users**:
-  1. **GitHub Search API** — searches each variant across profile fields
-     (login/name/email for accounts, name/description for repos).
-  2. **Pluggable web dorking** *(optional)* — Serper-powered
-     `site:github.com <company>` queries to find the *official* org the way a
-     human would Google it. Only runs when its API key is set; otherwise the tool
-     works with the GitHub API alone and does **not** break.
-  3. **Domain anchor** — the domains verify candidates: it checks the `blog`/
-     `email` on org/user/repo profiles, the repo `homepage`, and (optionally)
-     sampled commit-author emails against your domains.
+The three phases of the workflow are: **1) enumeration** (this tool's core),
+**2) leak discovery** (your chaining tools), **3) per-leak notification** (your
+tools piping into Notify). git_locate owns phase 1 and hands off cleanly to 2/3.
+
+### Discovery methodology (phase 1)
+
+Inputs are company names + domains. From them git_locate builds a **seed set**
+and works it through several complementary techniques, prioritized
+**orgs → repos → users**:
+
+- **Name-variant generation** — many spellings a login might use: joined,
+  spaced, hyphenated, underscored, individual words, word bi-grams, and common
+  suffixes (`inc`, `labs`, `io`, `hq`, `dev`, …). The **registrable label of
+  each domain** (`acme.com` → `acme`) is added as a seed too, so domains are
+  useful **with and without their TLD**.
+- **GitHub Search API** — searches each variant across profile fields
+  (login/name/email for accounts; name/description/readme for repos).
+- **Domain search** — finds assets that *reference* the domain even when the
+  name doesn't match: repos mentioning the domain, and accounts whose public
+  email is `in:email` on the domain.
+- **Web dorking** *(keyless by default)* — `site:github.com <company>` queries
+  to find the *official* org the way a human would Google it. Uses **DuckDuckGo
+  with no API key**; Serper is an optional higher-volume alternative. Low volume
+  by design (human names only, capped request count).
+- **Graph expansion** — bounded BFS pivots from confirmed nodes, which is how
+  you find the assets that never match a name at all:
+  - org → **public members** (users)
+  - user → **public organizations**
+  - repo → **contributors** (opt-in)
+  - plus owner-repo enumeration for every confirmed org/user.
+- **Domain anchor** — throughout, the domains verify candidates: `blog`/`email`
+  on profiles, repo `homepage`, and (optionally) sampled commit-author emails.
+
+### The rest
+
 - **Confidence scoring** — every result gets an explainable score in `[0, 1]`
-  built from weighted signals (domain match dominates).
+  built from weighted signals (domain match dominates); the signal breakdown is
+  in the JSON.
 - **Clean, chainable output** — structured JSON plus a flat repo-URL list ready
   to pipe into other tooling, and a Notify-compatible payload.
-- **Rate-limit handling** — automatic waits until the GitHub limit resets.
+- **Rate-limit handling** — automatic waits on genuine GitHub rate-limit
+  responses (a plain 403 returns immediately, no needless waiting).
 - **Nothing hardcoded** — everything is driven by a config file + environment
   variables; secrets live only in env vars named by the config.
 
@@ -78,8 +102,9 @@ runtime:
 
 ```bash
 export GITHUB_TOKEN=ghp_xxxxx        # recommended (raises rate limits a lot)
-export SERPER_API_KEY=xxxxx          # optional — enables the web-dork source
 export NOTIFY_PROVIDER_CONFIG=~/.config/notify/provider-config.yaml
+# SERPER_API_KEY is only needed if you switch web_dork.provider to "serper";
+# the default DuckDuckGo provider needs no key.
 ```
 
 Config resolution order: built-in defaults → `config.yaml`
@@ -97,18 +122,26 @@ source .venv/bin/activate
 # basic discovery
 gitlocate -c "Acme Corp" -d acme.com
 
+# lists from files (the usual case) — one entry per line
+gitlocate --company-file companies.txt --domain-file domains.txt
+# (aliases: --companies / --domains ; you can also put lists in config targets:)
+
 # several names/domains, custom output dir
 gitlocate -c "Acme Corp" -c acme-labs -d acme.com -d acme.io -o ./acme-recon
 
-# from files, disable web dorking for this run
+# disable web dorking for this run
 gitlocate --company-file companies.txt --domain-file domains.txt --no-web-dork
 
-# discover, then run your chaining tools and push results to Notify
-gitlocate -c "Acme Corp" -d acme.com --chain --notify
+# full run: enumerate, notify at phase 1->2, then run your chaining tools
+gitlocate --company-file companies.txt --domain-file domains.txt --chain --notify
 
 # inspect the effective config
 gitlocate --print-config
 ```
+
+Targets can come from **CLI flags, files, or the `targets:` block in
+`config.yaml`** — all three are merged and de-duplicated, so a fully
+file/config-driven run needs no positional arguments.
 
 Run `gitlocate --help` for all flags. You can also run it without installing:
 `python3 -m gitlocate -c "Acme Corp" -d acme.com`.
@@ -184,14 +217,28 @@ print the expanded commands without executing them.
 
 ---
 
-## Notify integration
+## Notify integration & the phase model
 
-`git_locate` is **Notify-compatible from the start**: the `notify.txt` payload is
-plain, line-oriented text — exactly what `notify -bulk` consumes on stdin. Enable
-with `notify.enabled: true` or `--notify`. Webhooks/secrets stay in Notify's own
-provider-config YAML (pointed to by `$NOTIFY_PROVIDER_CONFIG` or
-`notify.provider_config`); `git_locate` only pipes the payload in. Choose what to
-send with `notify.payload`: `summary` (default), `repos`, or `json`.
+The workflow has three phases:
+
+1. **Enumeration** — git_locate discovers the orgs/repos/users (this tool).
+2. **Leak discovery** — the [chaining](#tool-chaining) tools scan the repos.
+3. **Per-leak notification** — those tools pipe their findings into `notify`.
+
+git_locate fires a **Notify message at the phase 1 → phase 2 boundary**: when
+enumeration finishes and leak discovery is about to start, you get a webhook with
+the target, the counts, and the repos queued for scanning. This is on by default
+(`notify.on_phase_transition: true`) and also triggerable with `--notify`.
+
+It is **Notify-compatible by design**: the `notify.txt` payload is plain,
+line-oriented text — exactly what `notify -bulk` consumes on stdin. Webhooks and
+secrets stay in Notify's own provider-config YAML (pointed to by
+`$NOTIFY_PROVIDER_CONFIG` or `notify.provider_config`); git_locate only pipes the
+payload in. Choose what to send with `notify.payload`: `phase_transition`
+(default), `summary`, `repos`, or `json`.
+
+For **phase 3**, have your chaining commands pipe each finding into `notify`,
+e.g. `trufflehog git {repo_url} --json | notify -bulk`.
 
 ---
 
@@ -207,7 +254,10 @@ clamped to `[0, 1]`:
 | `description_match` | a variant appears in the description |
 | `multi_source` | seen through more than one source |
 | `web_dork` | surfaced by the web-dorking source |
+| `domain_search` | found by searching the target domain string |
 | `owner_confirmed` | (repos) the owner is a confirmed org/user |
+| `org_member` | (users) a public member of a confirmed org |
+| `related` | other pivot relation (a confirmed user's org, a contributor) |
 | `commit_email_domain` | a sampled commit email hits a target domain |
 
 Each result's `signals` map is included in the JSON so you can see *why* it

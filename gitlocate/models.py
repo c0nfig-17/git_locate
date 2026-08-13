@@ -21,6 +21,7 @@ SOURCE_GITHUB_API = "github_api"
 SOURCE_WEB_DORK = "web_dork"
 SOURCE_ORG_REPOS = "org_repos"       # repo enumerated from a confirmed owner
 SOURCE_DOMAIN_ANCHOR = "domain_anchor"
+SOURCE_PIVOT = "pivot"               # discovered by graph expansion
 
 
 @dataclass

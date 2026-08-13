@@ -73,13 +73,17 @@ class GitHubClient:
                 self._sleep(self.backoff_base ** attempt, "network error")
                 continue
 
-            # Primary rate limit exhausted.
+            # 429 is always throttling; a 403 is throttling ONLY when it carries
+            # rate-limit evidence. A bare 403 (permissions, blocked by a proxy,
+            # SSO) must return immediately instead of looping with backoff.
             if resp.status_code in (403, 429):
-                remaining = resp.headers.get("X-RateLimit-Remaining")
-                retry_after = resp.headers.get("Retry-After")
-                if self._maybe_wait_for_reset(resp, remaining, retry_after, attempt):
+                if self._is_rate_limited(resp) and \
+                        self._maybe_wait_for_reset(resp, attempt):
                     continue
-                log.warning("Rate limited (%s) and giving up: %s", resp.status_code, url)
+                if resp.status_code == 403:
+                    log.warning("HTTP 403 (not rate-limit; permissions/proxy?): %s", url)
+                else:
+                    log.warning("Rate limited (429) and giving up: %s", url)
                 return resp
 
             if resp.status_code >= 500:
@@ -90,17 +94,35 @@ class GitHubClient:
 
             return resp
 
-    def _maybe_wait_for_reset(self, resp, remaining, retry_after, attempt) -> bool:
-        """Return True if we waited and should retry, False to give up."""
+    @staticmethod
+    def _is_rate_limited(resp) -> bool:
+        """True only when the response carries genuine rate-limit evidence."""
+        if resp.status_code == 429:
+            return True
+        # 403: require a Retry-After, exhausted remaining, or an explicit message.
+        if resp.headers.get("Retry-After") is not None:
+            return True
+        if resp.headers.get("X-RateLimit-Remaining") == "0":
+            return True
+        body = ""
+        try:
+            body = (resp.json().get("message") or "").lower()
+        except (ValueError, AttributeError):
+            pass
+        return "rate limit" in body or "abuse" in body
+
+    def _maybe_wait_for_reset(self, resp, attempt) -> bool:
+        """Wait for the rate limit to reset. Return True if we waited."""
         if not self.auto_wait or attempt > self.retry_max:
             return False
         wait = None
+        retry_after = resp.headers.get("Retry-After")
         if retry_after is not None:
             try:
                 wait = float(retry_after)
             except ValueError:
                 wait = None
-        if wait is None and remaining == "0":
+        if wait is None and resp.headers.get("X-RateLimit-Remaining") == "0":
             reset = resp.headers.get("X-RateLimit-Reset")
             if reset is not None:
                 try:
@@ -108,7 +130,7 @@ class GitHubClient:
                 except ValueError:
                     wait = None
         if wait is None:
-            # Secondary/abuse limit without headers: exponential backoff.
+            # Secondary limit signalled by message but no timing headers.
             wait = self.backoff_base ** attempt
         if wait > self.max_wait:
             log.warning("Rate-limit wait %.0fs exceeds max_wait %ds; giving up",
@@ -181,6 +203,58 @@ class GitHubClient:
         for item in self._search("repositories", q):
             out.append(self._entity_from_repo_item(item, variant))
         return out
+
+    # -- domain-anchored search ------------------------------------------
+    # Searching by the raw domain finds assets that *reference* the company's
+    # domain (in a profile email, repo homepage, description or README) even when
+    # the login/name doesn't resemble the company name at all.
+    def search_accounts_by_email(self, domain: str, kind: str) -> List[Entity]:
+        """Find accounts whose public email is on ``domain`` (``in:email``)."""
+        gh_type = "org" if kind == KIND_ORG else "user"
+        q = f"{domain} in:email type:{gh_type}"
+        out = []
+        for item in self._search("users", q):
+            ent = self._entity_from_user_item(item, kind, variant=None)
+            ent.extra["domain_search"] = True
+            out.append(ent)
+        return out
+
+    def search_repos_by_domain(self, domain: str) -> List[Entity]:
+        """Find repos that mention ``domain`` in name/description/readme."""
+        q = f'"{domain}" in:name,description,readme'
+        out = []
+        for item in self._search("repositories", q):
+            ent = self._entity_from_repo_item(item, variant=None)
+            ent.extra["domain_search"] = True
+            out.append(ent)
+        return out
+
+    # -- graph pivots (cheap core-API calls, not search) -----------------
+    def _paginate_logins(self, path: str, limit: int) -> List[str]:
+        logins: List[str] = []
+        for page in range(1, self.max_pages + 1):
+            data = self._get_json(path, params={"per_page": self.per_page, "page": page})
+            if not data:
+                break
+            for item in data:
+                login = item.get("login")
+                if login:
+                    logins.append(login)
+            if len(data) < self.per_page or len(logins) >= limit:
+                break
+        return logins[:limit]
+
+    def org_public_members(self, login: str, limit: int = 100) -> List[str]:
+        """Public members of an organization (org -> users pivot)."""
+        return self._paginate_logins(f"/orgs/{quote(login)}/public_members", limit)
+
+    def user_orgs(self, login: str, limit: int = 100) -> List[str]:
+        """Public organization memberships of a user (user -> orgs pivot)."""
+        return self._paginate_logins(f"/users/{quote(login)}/orgs", limit)
+
+    def repo_contributors(self, full_name: str, limit: int = 50) -> List[str]:
+        """Contributor logins of a repo (repo -> users pivot)."""
+        return self._paginate_logins(f"/repos/{full_name}/contributors", limit)
 
     # -- owner repo enumeration ------------------------------------------
     def list_owner_repos(self, login: str, is_org: bool) -> List[Entity]:
