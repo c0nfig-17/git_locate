@@ -144,10 +144,15 @@ DEFAULTS: Dict[str, Any] = {
             #   {output_dir}  chaining.workdir
             #
             # Paste your tools below and set chaining.enabled: true.
+            # Use the wrappers install.sh puts on PATH (gitdorker, git-wild-hunt,
+            # credsweeper) — they run each tool from its own venv. Calling
+            # 'python3 /opt/GitDorker/GitDorker.py' directly uses the SYSTEM
+            # python, which lacks the tool's deps ('No module named termcolor').
             # Examples (uncomment / adapt):
-            #   "trufflehog git {repo_url} --json >> {output_dir}/trufflehog.jsonl"
+            #   "trufflehog git {repo_url} --json --no-update >> {output_dir}/trufflehog.jsonl"
             #   "gitleaks detect --source {clone_dir} --report-path {output_dir}/{owner}_{name}.gitleaks.json"
             #   "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}_{name}.credsweeper.json"
+            #   "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
             # =================================================================
         ],
     },

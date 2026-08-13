@@ -222,9 +222,26 @@ chaining:
   enabled: true
   clone: true
   commands:
-    - "trufflehog git {repo_url} --json >> {output_dir}/trufflehog.jsonl"
+    - "trufflehog git {repo_url} --json --no-update >> {output_dir}/trufflehog.jsonl"
     - "gitleaks detect --source {clone_dir} --report-path {output_dir}/{owner}__{name}.json"
     - "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}__{name}.cs.json"
+    - "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
+```
+
+Call the **wrappers `install.sh` puts on PATH** (`gitdorker`, `git-wild-hunt`,
+`credsweeper`), not the scripts under `/opt` directly. Each wrapper runs its
+tool from the dedicated venv the installer built. Invoking
+`python3 /opt/GitDorker/GitDorker.py` uses the *system* interpreter, which does
+not have the tool's dependencies — that is what `No module named 'termcolor'`
+means. Pass trufflehog `--no-update` so it does not try (and fail) to replace
+its own root-owned binary during a run.
+
+If a wrapped tool still errors on import (e.g. git-wild-hunt failing on
+`urllib3.packages.six.moves`), its venv has an incompatible dependency; repair
+just that venv, for example:
+
+```bash
+/opt/git-wild-hunt/.venv/bin/pip install 'urllib3<2' six
 ```
 
 Enable with `chaining.enabled: true` or the `--chain` flag. Use `--dry-run` to

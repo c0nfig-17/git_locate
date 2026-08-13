@@ -153,12 +153,20 @@ chaining:
     #   {clone_dir}  local clone path (needs clone: true)
     #   {output_dir} = chaining.workdir
     #
-    # Paste YOUR tools below and flip enabled: true. Reference examples:
+    # Paste YOUR tools below and flip enabled: true.
     #
-    # - "trufflehog git {repo_url} --json >> {output_dir}/trufflehog.jsonl"
+    # Prefer the wrappers install.sh puts on PATH (gitdorker, git-wild-hunt,
+    # credsweeper): each runs its tool from its OWN venv. Do NOT call
+    # 'python3 /opt/GitDorker/GitDorker.py' directly — that uses the system
+    # python, which lacks the tool's deps ('No module named termcolor').
+    # trufflehog: pass --no-update so it doesn't try (and fail) to self-update
+    # a root-owned binary mid-run.
+    # Reference examples:
+    #
+    # - "trufflehog git {repo_url} --json --no-update >> {output_dir}/trufflehog.jsonl"
     # - "gitleaks detect --source {clone_dir} --report-format json --report-path {output_dir}/{owner}__{name}.gitleaks.json"
     # - "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}__{name}.credsweeper.json"
-    # - "python3 /opt/GitDorker/GitDorker.py -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
+    # - "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
     # - "git-wild-hunt -s {repo_url}"
     # - "github-subdomains -d {name} -t $GITHUB_TOKEN -o {output_dir}/{owner}__{name}.subdomains.txt"
     # =======================================================================
