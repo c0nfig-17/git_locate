@@ -128,11 +128,20 @@ DEFAULTS: Dict[str, Any] = {
         "pretty": True,
     },
     "chaining": {
-        "enabled": False,
+        # Phase 2 runs by default: enumerate (phase 1) -> scan every discovered
+        # repo with the tools below -> notify. Disable with --no-chain or by
+        # setting chaining.enabled: false.
+        "enabled": True,
         "workdir": "./output/chaining",
-        "clone": False,             # some tools operate on URLs, others on a clone
+        # Clone each repo once so tools that need a working tree (gitleaks,
+        # credsweeper) can point at {clone_dir}. trufflehog scans the URL and
+        # does not need this.
+        "clone": True,
         "timeout_seconds": 1800,
         "min_confidence": 0.0,
+        # Any command whose leading tool is not installed is SKIPPED with an
+        # install hint (not counted as a failure), so a partial toolbox still
+        # produces results instead of a wall of errors.
         "commands": [
             # ================= BLOQUE PARA PEGAR HERRAMIENTAS =================
             # One shell command per discovered repo. Available placeholders:
@@ -143,16 +152,19 @@ DEFAULTS: Dict[str, Any] = {
             #   {clone_dir}   local clone path (only if chaining.clone: true)
             #   {output_dir}  chaining.workdir
             #
-            # Paste your tools below and set chaining.enabled: true.
-            # Use the wrappers install.sh puts on PATH (gitdorker, git-wild-hunt,
-            # credsweeper) — they run each tool from its own venv. Calling
-            # 'python3 /opt/GitDorker/GitDorker.py' directly uses the SYSTEM
-            # python, which lacks the tool's deps ('No module named termcolor').
-            # Examples (uncomment / adapt):
-            #   "trufflehog git {repo_url} --json --no-update >> {output_dir}/trufflehog.jsonl"
-            #   "gitleaks detect --source {clone_dir} --report-path {output_dir}/{owner}_{name}.gitleaks.json"
-            #   "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}_{name}.credsweeper.json"
+            # These defaults work out of the box after ./install.sh. Add your own
+            # tools here. Use the wrappers install.sh puts on PATH (gitdorker,
+            # git-wild-hunt, credsweeper) — they run each tool from its own venv.
+            # Calling 'python3 /opt/GitDorker/GitDorker.py' directly uses the
+            # SYSTEM python, which lacks the tool's deps ('No module named
+            # termcolor'). trufflehog needs --no-update so it does not try (and
+            # fail) to self-update its root-owned binary mid-run.
+            "trufflehog git {repo_url} --no-update --json >> {output_dir}/trufflehog.jsonl",
+            "gitleaks detect --source {clone_dir} --report-format json --report-path {output_dir}/{owner}__{name}.gitleaks.json",
+            # More scanners you can enable (installed by ./install.sh):
+            #   "credsweeper --path {clone_dir} --save-json {output_dir}/{owner}__{name}.credsweeper.json"
             #   "gitdorker -tf /opt/GitDorker/token.txt -q {name} -d /opt/GitDorker/Dorks/medium_dorks.txt"
+            #   "github-subdomains -d {name} -t $GITHUB_TOKEN -o {output_dir}/{owner}__{name}.subdomains.txt"
             # =================================================================
         ],
     },

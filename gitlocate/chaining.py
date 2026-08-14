@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from typing import Dict, List, Optional
@@ -30,6 +31,38 @@ from typing import Dict, List, Optional
 from .models import Entity, Findings, KIND_REPO
 
 log = logging.getLogger("gitlocate.chaining")
+
+#: How to (re)install each tool we ship a default command for, shown when a
+#: command is skipped because its tool is not on PATH.
+_INSTALL_HINTS = {
+    "trufflehog": "./install.sh trufflehog",
+    "gitleaks": "./install.sh gitleaks",
+    "credsweeper": "./install.sh credsweeper",
+    "gitdorker": "./install.sh gitdorker",
+    "git-wild-hunt": "./install.sh git-wild-hunt",
+    "github-subdomains": "./install.sh github-subdomains",
+    "notify": "./install.sh notify",
+}
+
+
+def _leading_executable(cmd: str) -> Optional[str]:
+    """Return the program a shell command would run, or None if undeterminable.
+
+    Skips leading ``NAME=value`` environment assignments so ``FOO=bar tool ...``
+    resolves to ``tool``. Returns None when the command cannot be tokenized
+    (unbalanced quotes, etc.) so we let the shell run it rather than guessing.
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for tok in tokens:
+        # env assignment prefix: NAME=value (name is a valid identifier)
+        eq = tok.find("=")
+        if eq > 0 and tok[:eq].replace("_", "a").isalnum() and tok[0].isalpha():
+            continue
+        return tok
+    return None
 
 
 def _placeholders(entity: Entity, clone_dir: str, output_dir: str) -> Dict[str, str]:
@@ -61,6 +94,25 @@ class Chainer:
         self.clone = bool(config.get("chaining.clone", False))
         self.timeout = int(config.get("chaining.timeout_seconds", 1800))
         self.min_conf = float(config.get("chaining.min_confidence", 0.0))
+        # Cache which(binary) results and remember which tools we had to skip so
+        # we can print one actionable summary at the end instead of a wall of
+        # "command not found" failures.
+        self._avail_cache: Dict[str, bool] = {}
+        self._missing_tools: Dict[str, int] = {}
+
+    def _tool_available(self, binary: Optional[str]) -> bool:
+        """True if the command's program can be run. Unknown/unparseable -> True
+        (let the shell try) so we never wrongly block a valid command."""
+        if not binary:
+            return True
+        if binary in self._avail_cache:
+            return self._avail_cache[binary]
+        if os.sep in binary or (os.altsep and os.altsep in binary):
+            ok = os.path.isfile(binary) and os.access(binary, os.X_OK)
+        else:
+            ok = shutil.which(binary) is not None
+        self._avail_cache[binary] = ok
+        return ok
 
     def run(self, findings: Findings) -> Dict[str, int]:
         stats = {"repos": 0, "commands_run": 0, "failures": 0, "skipped": 0}
@@ -109,6 +161,16 @@ class Chainer:
                 cmd = template
                 for key, val in ph.items():
                     cmd = cmd.replace("{" + key + "}", val)
+                # Skip (don't fail) a command whose tool isn't installed — a
+                # missing scanner shouldn't look like the run is broken. In
+                # dry-run we still print it, so the preview shows every command.
+                if not self.dry_run:
+                    binary = _leading_executable(cmd)
+                    if not self._tool_available(binary):
+                        self._missing_tools[binary] = \
+                            self._missing_tools.get(binary, 0) + 1
+                        stats["skipped"] += 1
+                        continue
                 ok = self._run_command(cmd)
                 if ok is None:
                     stats["skipped"] += 1
@@ -116,7 +178,16 @@ class Chainer:
                     stats["commands_run"] += 1
                 else:
                     stats["failures"] += 1
+        self._report_missing_tools()
         return stats
+
+    def _report_missing_tools(self) -> None:
+        """One actionable summary for tools that were never on PATH."""
+        for tool, count in self._missing_tools.items():
+            hint = _INSTALL_HINTS.get(tool, "install it and re-run "
+                                      "(see ./install.sh --help)")
+            log.warning("Skipped %d command(s): '%s' is not installed. "
+                        "Install it with: %s", count, tool, hint)
 
     def _clone_repo(self, entity: Entity) -> Optional[str]:
         target = os.path.join(self.workdir, _safe_dirname(entity.identifier))
@@ -161,8 +232,13 @@ class Chainer:
         log.debug("chaining command exited %s in %.1fs: %s",
                   proc.returncode, elapsed, cmd)
         if proc.returncode != 0:
-            log.warning("Command exited %s (%.1fs): %s", proc.returncode, elapsed, cmd)
-            return False
+            # The command RAN (it wasn't a failure to launch); a non-zero exit
+            # is frequently how a scanner signals it found something — gitleaks
+            # exits 1 on leaks, trufflehog 183 with --fail — so we surface the
+            # code but do not treat the whole run as failed.
+            log.info("Command finished with exit %s in %.1fs (non-zero often "
+                     "means findings, not an error): %s",
+                     proc.returncode, elapsed, cmd)
         return True
 
 

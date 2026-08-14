@@ -97,9 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-web-dork", action="store_true",
                    help="Disable the web-dorking source for this run.")
     p.add_argument("--chain", action="store_true",
-                   help="Run the configured chaining commands on discovered repos.")
+                   help="Force phase 2 (run the chaining commands on discovered "
+                        "repos). On by default via chaining.enabled.")
+    p.add_argument("--no-chain", action="store_true",
+                   help="Skip phase 2 (leak discovery) for this run.")
     p.add_argument("--notify", action="store_true",
-                   help="Send results to ProjectDiscovery Notify after discovery.")
+                   help="Force sending results to ProjectDiscovery Notify.")
+    p.add_argument("--no-notify", action="store_true",
+                   help="Do not send the phase-transition Notify for this run.")
     p.add_argument("--dry-run", action="store_true",
                    help="For chaining: print commands instead of executing them.")
     p.add_argument("--print-config", action="store_true",
@@ -228,8 +233,13 @@ def _run_phases(args, config) -> int:
     # ---- Phase transition notification (1 -> 2) -------------------------
     # Notify fires here, at the boundary between enumeration and leak
     # discovery, so you know phase 2 is about to run over the discovered repos.
-    want_notify = args.notify or config.get("notify.enabled", False) \
-        or config.get("notify.on_phase_transition", False)
+    # On by default (notify.on_phase_transition); --no-notify skips it.
+    want_notify = bool(config.get("notify.enabled", False)
+                       or config.get("notify.on_phase_transition", False))
+    if args.notify:
+        want_notify = True
+    if args.no_notify:
+        want_notify = False
     if want_notify:
         if notify_mod.send(config, notify_text):
             log.info("Phase-transition notification sent to Notify.")
@@ -237,21 +247,27 @@ def _run_phases(args, config) -> int:
             log.warning("Notify send did not complete (see warnings above).")
 
     # ======================= PHASE 2: leak discovery =======================
-    # Runs the configured external tools (gitleaks, trufflehog, ...) per repo.
-    # Phase 3 (per-leak notification) is handled by those tools' own configs
-    # (e.g. piping their findings into `notify`).
-    if args.chain or config.get("chaining.enabled", False):
+    # Runs the configured external tools (trufflehog, gitleaks, ...) per repo.
+    # On by default (chaining.enabled); --no-chain skips it. Phase 3 (per-leak
+    # notification) is handled by those tools' own configs (e.g. piping their
+    # findings into `notify`).
+    run_chain = bool(config.get("chaining.enabled", False))
+    if args.chain:
+        run_chain = True
+    if args.no_chain:
+        run_chain = False
+    if run_chain:
         log.info("=== Phase 2: leak discovery (chaining) ===")
         chainer = Chainer(config, dry_run=args.dry_run)
         stats = chainer.run(findings)
-        verb = "would run" if args.dry_run else "run"
+        verb = "would run" if args.dry_run else "ran"
         suffix = " (dry-run: nothing was executed)" if args.dry_run else ""
         log.info("Chaining: %d repos, %d commands %s, %d failures, %d skipped%s",
                  stats["repos"], stats["commands_run"], verb, stats["failures"],
                  stats["skipped"], suffix)
     else:
-        log.info("Phase 2 (leak discovery) not run. Enable with --chain or "
-                 "chaining.enabled, after pasting your tools into config.yaml.")
+        log.info("Phase 2 (leak discovery) skipped (--no-chain or "
+                 "chaining.enabled: false).")
 
     # Emit the JSON path on stdout for easy piping in shell pipelines.
     print(json_path)
