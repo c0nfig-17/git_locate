@@ -265,7 +265,9 @@ class GitHubClient:
         q = f"{variant} type:org{self._in_qualifier(fields)}"
         out = []
         for item in self._search("users", q):
-            out.append(self._entity_from_user_item(item, KIND_ORG, variant))
+            ent = self._entity_from_user_item(item, KIND_ORG, variant)
+            if ent is not None:
+                out.append(ent)
         return out
 
     def search_users(self, variant: str) -> List[Entity]:
@@ -273,7 +275,9 @@ class GitHubClient:
         q = f"{variant} type:user{self._in_qualifier(fields)}"
         out = []
         for item in self._search("users", q):
-            out.append(self._entity_from_user_item(item, KIND_USER, variant))
+            ent = self._entity_from_user_item(item, KIND_USER, variant)
+            if ent is not None:
+                out.append(ent)
         return out
 
     def search_repos(self, variant: str) -> List[Entity]:
@@ -282,7 +286,9 @@ class GitHubClient:
         q = f"{variant}{self._in_qualifier(fields)}"
         out = []
         for item in self._search("repositories", q):
-            out.append(self._entity_from_repo_item(item, variant))
+            ent = self._entity_from_repo_item(item, variant)
+            if ent is not None:
+                out.append(ent)
         return out
 
     # -- domain-anchored search ------------------------------------------
@@ -296,6 +302,8 @@ class GitHubClient:
         out = []
         for item in self._search("users", q):
             ent = self._entity_from_user_item(item, kind, variant=None)
+            if ent is None:
+                continue
             ent.extra["domain_search"] = True
             out.append(ent)
         return out
@@ -306,6 +314,8 @@ class GitHubClient:
         out = []
         for item in self._search("repositories", q):
             ent = self._entity_from_repo_item(item, variant=None)
+            if ent is None:
+                continue
             ent.extra["domain_search"] = True
             out.append(ent)
         return out
@@ -353,6 +363,8 @@ class GitHubClient:
                 break
             for item in data:
                 ent = self._entity_from_repo_item(item, variant=None)
+                if ent is None:
+                    continue
                 ent.sources = {SOURCE_ORG_REPOS}
                 ent.extra["owner_login"] = login
                 out.append(ent)
@@ -387,8 +399,13 @@ class GitHubClient:
 
     # -- item -> Entity ---------------------------------------------------
     @staticmethod
-    def _entity_from_user_item(item: Dict, kind: str, variant: Optional[str]) -> Entity:
-        login = item.get("login", "")
+    def _entity_from_user_item(item: Dict, kind: str,
+                               variant: Optional[str]) -> Optional[Entity]:
+        login = (item.get("login") or "").strip()
+        if not login:
+            # A search hit without a login is unusable — skip it rather than
+            # create an empty-identifier entity that pollutes the findings.
+            return None
         ent = Entity(
             kind=kind,
             identifier=login,
@@ -401,12 +418,15 @@ class GitHubClient:
         return ent
 
     @staticmethod
-    def _entity_from_repo_item(item: Dict, variant: Optional[str]) -> Entity:
-        full = item.get("full_name") or ""
+    def _entity_from_repo_item(item: Dict, variant: Optional[str]) -> Optional[Entity]:
+        full = (item.get("full_name") or "").strip()
+        identifier = full or (item.get("name") or "").strip()
+        if not identifier:
+            return None
         owner = (item.get("owner") or {}).get("login", "")
         ent = Entity(
             kind=KIND_REPO,
-            identifier=full or item.get("name", ""),
+            identifier=identifier,
             url=item.get("html_url") or (f"https://github.com/{full}" if full else ""),
             name=item.get("name"),
             description=item.get("description"),
@@ -417,7 +437,13 @@ class GitHubClient:
         ent.extra["clone_url"] = item.get("clone_url") or (
             f"https://github.com/{full}.git" if full else "")
         ent.extra["fork"] = bool(item.get("fork"))
+        ent.extra["archived"] = bool(item.get("archived"))
         ent.extra["stars"] = item.get("stargazers_count")
+        # Topics often carry the company/product name even when the repo name
+        # doesn't; keep them so scoring can match against them.
+        topics = item.get("topics")
+        if isinstance(topics, list):
+            ent.extra["topics"] = [str(t).lower() for t in topics if t]
         if variant:
             ent.matched_variants.add(variant)
         return ent

@@ -55,7 +55,11 @@ and works it through several complementary techniques, prioritized
 
 - **Confidence scoring** — every result gets an explainable score in `[0, 1]`
   built from weighted signals (domain match dominates); the signal breakdown is
-  in the JSON.
+  in the JSON. Repo **topics** are matched alongside the description, so a repo
+  tagged with the company/product name still scores even if its name doesn't.
+- **Noise control** — **forks are dropped by default** (they are usually copies
+  of someone else's project); a fork that anchors to a target domain is always
+  kept. Flip `github.include_forks: true` to keep every fork.
 - **Clean, chainable output** — structured JSON plus a flat repo-URL list ready
   to pipe into other tooling, and a Notify-compatible payload.
 - **Rate-limit handling** — automatic waits on genuine GitHub rate-limit
@@ -416,6 +420,25 @@ scored the way it did.
 
 ---
 
+## Development & tests
+
+The core logic (variants, scoring, domain anchoring, config, chaining, the
+Notify/YAML validators, web-dork parsing and the CLI phase orchestration) is
+covered by a `pytest` suite that runs without any network access:
+
+```bash
+pip install -e ".[dev]"     # installs pytest alongside the tool
+pytest                       # runs the whole suite
+```
+
+**CI runs on every push and pull request** (`.github/workflows/ci.yml`): the
+test suite on Python 3.9 and 3.11, a `--print-config` smoke test, plus
+`bash -n` and `shellcheck` over `install.sh`. That is the guardrail that keeps
+the "it worked yesterday" regressions from coming back — a change that breaks
+enumeration, chaining or the installer fails CI instead of shipping.
+
+---
+
 ## Layout
 
 ```
@@ -435,4 +458,7 @@ gitlocate/
 └── output/
     ├── writer.py       # JSON + flat repos + notify payload
     └── notify.py       # ProjectDiscovery Notify integration
+
+tests/                   # pytest suite (network-free)
+.github/workflows/ci.yml # tests + install.sh lint on every push/PR
 ```

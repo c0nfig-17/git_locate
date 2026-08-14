@@ -45,6 +45,7 @@ DEFAULTS: Dict[str, Any] = {
         "read_timeout": 30,              # seconds to wait for a response
         "enumerate_owner_repos": True,   # list repos of confirmed orgs/users
         "owner_repo_min_confidence": 0.4,
+        "include_forks": False,          # drop forks (noise) unless domain-anchored
         "fetch_profiles": True,          # pull blog/email for domain anchoring
         "fetch_commit_emails": False,    # expensive; off by default
         "commit_sample": 20,

@@ -42,10 +42,16 @@ def _exact_variant_hit(entity: Entity, variants: Set[str]) -> bool:
 
 
 def _description_variant_hit(entity: Entity, variants: Iterable[str]) -> bool:
-    desc = (entity.description or "").lower()
-    if not desc:
+    # Match variants against the description AND the repo topics — topics often
+    # carry the company/product name even when the description doesn't.
+    corpus = (entity.description or "").lower()
+    topics = entity.extra.get("topics")
+    if isinstance(topics, list) and topics:
+        corpus = corpus + " " + " ".join(str(t).lower() for t in topics)
+    corpus = corpus.strip()
+    if not corpus:
         return False
-    return any(v and v.lower() in desc for v in variants)
+    return any(v and v.lower() in corpus for v in variants)
 
 
 class Scorer:

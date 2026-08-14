@@ -317,6 +317,7 @@ class Engine:
     def _process_repos(self, gh: GitHubClient, raw_repos: List[Entity],
                        targets: Set[str], findings: Findings) -> None:
         fetch_commits = self.cfg.get("github.fetch_commit_emails", False)
+        include_forks = bool(self.cfg.get("github.include_forks", False))
         sample = int(self.cfg.get("github.commit_sample", 20))
         # De-duplicate repos by identifier before the (expensive) commit sampling.
         deduped: Dict[str, Entity] = {}
@@ -327,9 +328,17 @@ class Engine:
             else:
                 deduped[key] = ent
 
+        dropped_forks = 0
         for ent in deduped.values():
             if targets:
                 anchor_entity(ent, targets)   # repo homepage/blog anchoring
+            # Forks are usually copies of someone else's project — noise for
+            # recon. Drop them by default, but always keep a fork that anchors
+            # to a target domain (that is a real signal, not noise).
+            if (not include_forks and ent.extra.get("fork")
+                    and not ent.matched_domains):
+                dropped_forks += 1
+                continue
             if fetch_commits and "/" in ent.identifier:
                 emails = gh.commit_author_emails(ent.identifier, sample=sample)
                 if emails and targets:
@@ -337,6 +346,9 @@ class Engine:
                     if matched:
                         ent.extra["commit_email_match"] = True
             findings.add(ent)
+        if dropped_forks:
+            log.info("Dropped %d fork(s) with no domain anchor "
+                     "(set github.include_forks: true to keep them)", dropped_forks)
 
     def _filter(self, findings: Findings) -> Findings:
         min_conf = float(self.cfg.get("scoring.min_confidence", 0.0))
