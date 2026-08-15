@@ -32,6 +32,7 @@ github:
   read_timeout: 30                 # seconds to wait for a response
   enumerate_owner_repos: true      # list repos of confirmed orgs/users
   owner_repo_min_confidence: 0.4   # only enumerate owners scoring >= this
+  include_forks: false             # drop forks (noise) unless they hit a domain
   fetch_profiles: true             # pull blog/email to anchor on domains
   fetch_commit_emails: false       # sample commit emails (slower, stronger)
   commit_sample: 20
@@ -42,7 +43,7 @@ github:
   discover_users: true
   search_in:                       # profile fields the Search API looks in
     orgs: [login, name, email]
-    repos: [name, description]
+    repos: [name, description, readme]
     users: [login, name, email]
 
 # --------------------------------------------------------------------

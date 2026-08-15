@@ -16,6 +16,9 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.urls]
 Homepage = "https://github.com/c0nfig-17/git_locate"
 
@@ -24,3 +27,7 @@ gitlocate = "gitlocate.cli:main"
 
 [tool.setuptools]
 packages = ["gitlocate", "gitlocate.sources", "gitlocate.output"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

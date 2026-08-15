@@ -79,6 +79,18 @@ have() { command -v "$1" >/dev/null 2>&1; }
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 run_priv() { $SUDO "$@"; }
 
+# Make sure the directory we drop binaries into exists and is on PATH. A custom
+# GOBIN_DIR that does not exist yet would make every `install -m 0755 ... DST`
+# fail; create it once, up front.
+ensure_gobin_dir() {
+  [ -d "$GOBIN_DIR" ] || run_priv mkdir -p "$GOBIN_DIR" 2>/dev/null || true
+  case ":${PATH}:" in
+    *":${GOBIN_DIR}:"*) : ;;
+    *) export PATH="${GOBIN_DIR}:${PATH}"
+       warn "${GOBIN_DIR} was not on PATH; added it for this run. Add it to your shell profile so installed tools stay on PATH." ;;
+  esac
+}
+
 # Run a best-effort step: log failures, never abort the whole install.
 try() {
   local desc="$1"; shift
@@ -273,8 +285,7 @@ install_core() {
   elif "$pip" install "${REPO_ROOT}"; then
     warn "editable install failed; installed the package non-editable instead"
   else
-    warn "package install failed; installing runtime deps only "\
-"(you can still run 'python -m gitlocate' from ${REPO_ROOT})"
+    warn "package install failed; installing runtime deps only (you can still run 'python -m gitlocate' from ${REPO_ROOT})"
     "$pip" install -r "${REPO_ROOT}/requirements.txt" \
       || { err "dependency install failed — see ${INSTALL_LOG}"; return 1; }
   fi
@@ -435,12 +446,22 @@ verify_install() {
   log "Post-install verification (running each tool):"
   local gl="${REPO_ROOT}/${VENV_DIR}/bin/gitlocate"
   local py="${REPO_ROOT}/${VENV_DIR}/bin/python"
+  local runner=""
   if [ -x "$gl" ] && "$gl" --version >/dev/null 2>&1; then
-    log "  gitlocate: OK ($("$gl" --version 2>&1))"
+    log "  gitlocate: OK ($("$gl" --version 2>&1))"; runner="$gl"
   elif [ -x "$py" ] && "$py" -m gitlocate --version >/dev/null 2>&1; then
-    log "  gitlocate: OK (via 'python -m gitlocate')"
+    log "  gitlocate: OK (via 'python -m gitlocate')"; runner="$py -m gitlocate"
   else
     err "  gitlocate: DID NOT RUN — the core tool is broken; see ${INSTALL_LOG}"
+  fi
+  # Config canary: load the seeded config.yaml. Catches a malformed config at
+  # install time instead of on the operator's first real run.
+  if [ -n "$runner" ]; then
+    if ( cd "$REPO_ROOT" && $runner --print-config >/dev/null 2>&1 ); then
+      log "  config.yaml: OK (parses and loads)"
+    else
+      err "  config.yaml: FAILED to load — run '$runner --print-config' in ${REPO_ROOT} to see the error; see ${INSTALL_LOG}"
+    fi
   fi
   # Go binaries: presence ~= works. Python-wrapped tools: actually exercise them.
   _soft_probe trufflehog    trufflehog --version
@@ -468,6 +489,7 @@ run_named_tool() {
 # ---- main -----------------------------------------------------------
 main() {
   banner
+  ensure_gobin_dir
   # Targeted mode: `install.sh trufflehog [gitleaks ...]` installs just those.
   if [ "${#ONLY_TOOLS[@]}" -gt 0 ]; then
     log "Targeted install: ${ONLY_TOOLS[*]}"
