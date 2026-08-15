@@ -76,6 +76,9 @@ class Leak:
             lines.append(f"repo:   {self.repo}")
         if loc:
             lines.append(f"file:   {loc}")
+        count = self.extra.get("locations")
+        if isinstance(count, int) and count > 1:
+            lines.append(f"seen:   {count} locations (first shown)")
         if self.commit:
             lines.append(f"commit: {self.commit}")
         if self.redacted:
@@ -191,15 +194,44 @@ def _repo_from_gitleaks_filename(path: str) -> str:
     return base.replace("__", "/", 1)
 
 
-def collect_leaks(workdir: str, verified_only: bool = True) -> List[Leak]:
+def collect_leaks(workdir: str, verified_only: bool = True,
+                  include_gitleaks: bool = True) -> List[Leak]:
     """Parse every known scanner output under ``workdir`` into leaks."""
     leaks: List[Leak] = []
     th = os.path.join(workdir, TRUFFLEHOG_FILE)
     if os.path.isfile(th):
         leaks.extend(parse_trufflehog_jsonl(th, verified_only=verified_only))
-    for gl in sorted(glob.glob(os.path.join(workdir, GITLEAKS_GLOB))):
-        leaks.extend(parse_gitleaks_json(gl, _repo_from_gitleaks_filename(gl)))
+    if include_gitleaks:
+        for gl in sorted(glob.glob(os.path.join(workdir, GITLEAKS_GLOB))):
+            leaks.extend(parse_gitleaks_json(gl, _repo_from_gitleaks_filename(gl)))
     return leaks
+
+
+def collapse_duplicates(leaks: List[Leak]) -> List[Leak]:
+    """Merge leaks that are the same secret seen in several places.
+
+    gitleaks (and trufflehog on copied files/fixtures) reports the identical
+    match once per file — e.g. the same placeholder across ``fixtures/v1..v4``.
+    Grouping by ``(tool, repo, rule, redacted)`` collapses those into one alert
+    that keeps the first location and a count of how many were found. The
+    representative's fingerprint is made content-based so the seen-set de-dupes
+    the whole group across runs regardless of which file it first appeared in.
+    """
+    groups: Dict[tuple, Leak] = {}
+    order: List[tuple] = []
+    for leak in leaks:
+        key = (leak.tool, leak.repo, leak.rule, leak.redacted)
+        rep = groups.get(key)
+        if rep is None:
+            leak.extra = dict(leak.extra)
+            leak.extra["locations"] = 1
+            leak.extra["fingerprint"] = "collapsed|" + "|".join(
+                [leak.tool, leak.repo, leak.rule, leak.redacted])
+            groups[key] = leak
+            order.append(key)
+        else:
+            rep.extra["locations"] += 1
+    return [groups[k] for k in order]
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +250,10 @@ class LeakNotifier:
         self.workdir = workdir
         self.dry_run = dry_run
         self.verified_only = bool(config.get("notify.per_leak_verified_only", True))
+        self.include_gitleaks = bool(
+            config.get("notify.per_leak_include_gitleaks", True))
+        self.collapse = bool(
+            config.get("notify.per_leak_collapse_duplicates", True))
         self.max_messages = int(config.get("notify.per_leak_max_messages", 200))
         self._state_path = os.path.join(workdir, STATE_FILE)
         self._seen = self._load_seen()
@@ -251,7 +287,10 @@ class LeakNotifier:
         """Notify any leaks not seen before. Returns how many were sent."""
         if self.max_messages and self._sent >= self.max_messages:
             return 0
-        leaks = collect_leaks(self.workdir, verified_only=self.verified_only)
+        leaks = collect_leaks(self.workdir, verified_only=self.verified_only,
+                              include_gitleaks=self.include_gitleaks)
+        if self.collapse:
+            leaks = collapse_duplicates(leaks)
         new = 0
         for leak in leaks:
             fp = leak.fingerprint()

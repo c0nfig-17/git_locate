@@ -185,7 +185,10 @@ DEFAULTS: Dict[str, Any] = {
         # under chaining.workdir; de-dupes across sweeps/re-runs.
         "per_leak": True,
         "per_leak_verified_only": True,   # trufflehog: only verified findings
-                                          # (gitleaks findings are always sent)
+        "per_leak_include_gitleaks": True,  # False = trufflehog only (gitleaks
+                                          # can't verify, so it is the noisy one)
+        "per_leak_collapse_duplicates": True,  # same secret across files/fixtures
+                                          # -> one message with a location count
         "per_leak_max_messages": 200,     # safety cap per run (0 = unlimited)
     },
 }

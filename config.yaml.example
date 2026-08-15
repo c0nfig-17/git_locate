@@ -205,5 +205,11 @@ notify:
   bulk: true
   payload: phase_transition        # phase_transition | summary | repos | json
   per_leak: true                   # phase 3: one Notify message per leak found
-  per_leak_verified_only: true     # trufflehog: only VERIFIED (gitleaks: always)
+  per_leak_verified_only: true     # trufflehog: only VERIFIED findings
+  per_leak_include_gitleaks: true  # false = trufflehog only. gitleaks can't
+                                   # verify, so it is the noisy source (matches
+                                   # curl/env-var examples in docs); set false
+                                   # to alert only on verified secrets.
+  per_leak_collapse_duplicates: true  # the same secret in many files/fixtures
+                                   # is sent ONCE, with a location count
   per_leak_max_messages: 200       # cap per run so a noisy repo can't flood (0 = off)

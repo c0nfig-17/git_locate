@@ -330,9 +330,21 @@ understands the two default chaining outputs out of the box:
 
 This is on by default (`notify.per_leak: true`). A persistent seen-set in the
 chaining workdir de-duplicates, so alerts stream per repo during a run and a
-re-run only notifies genuinely new leaks. `notify.per_leak_max_messages` (default
-200, `0` = unlimited) caps how many are sent per run so a noisy repo can't flood
-your channel.
+re-run only notifies genuinely new leaks.
+
+Noise controls (gitleaks matches every `curl`/env-var example in docs, so it is
+the loud one):
+
+- `notify.per_leak_include_gitleaks` (default `true`) — set `false` to alert
+  only on trufflehog's **verified** secrets and skip gitleaks entirely.
+- `notify.per_leak_collapse_duplicates` (default `true`) — the same secret found
+  in many files/fixtures (e.g. `fixtures/v1..v4`) is sent **once**, with a count
+  of how many locations it appeared in.
+- `notify.per_leak_max_messages` (default `200`, `0` = unlimited) — hard cap per
+  run so a noisy repo can't flood your channel.
+
+If you change these after a run, delete the seen-set
+(`output/chaining/.gitlocate_notified.json`) to re-alert from scratch.
 
 To alert on leaks from a **previous** run's output without re-scanning:
 

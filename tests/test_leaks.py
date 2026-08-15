@@ -6,6 +6,7 @@ from gitlocate.output import leaks as leaks_mod
 from gitlocate.output.leaks import (
     Leak,
     LeakNotifier,
+    collapse_duplicates,
     collect_leaks,
     parse_gitleaks_json,
     parse_trufflehog_jsonl,
@@ -115,9 +116,11 @@ def test_notifier_respects_max_messages(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(leaks_mod.notify_mod, "send",
                         lambda cfg, payload, quiet=False: sent.append(payload) or True)
+    # distinct secrets (different redacted) so collapse doesn't merge them
     _write_trufflehog(tmp_path / "trufflehog.jsonl",
-                      _th_finding(file="a"), _th_finding(file="b"),
-                      _th_finding(file="c"))
+                      _th_finding(file="a", redacted="AKIA1"),
+                      _th_finding(file="b", redacted="AKIA2"),
+                      _th_finding(file="c", redacted="AKIA3"))
     cfg = load_config(None)
     cfg.data["notify"]["per_leak_max_messages"] = 2
     notifier = LeakNotifier(cfg, str(tmp_path))
@@ -138,6 +141,47 @@ def test_dry_run_does_not_persist_state(tmp_path, monkeypatch):
     # ...so a subsequent real run still sends the leak.
     assert LeakNotifier(cfg, str(tmp_path)).sweep() == 1
     assert (tmp_path / leaks_mod.STATE_FILE).exists()
+
+
+def test_collect_leaks_can_exclude_gitleaks(tmp_path):
+    _write_trufflehog(tmp_path / "trufflehog.jsonl", _th_finding())
+    (tmp_path / "acme__api.gitleaks.json").write_text(
+        json.dumps([{"RuleID": "aws", "File": "a", "StartLine": 1}]))
+    only_th = collect_leaks(str(tmp_path), include_gitleaks=False)
+    assert [l.tool for l in only_th] == ["trufflehog"]
+
+
+def test_collapse_duplicates_merges_same_secret_across_files():
+    # same rule + same match in four fixture copies -> one alert, count 4
+    leaks = [
+        Leak(tool="gitleaks", rule="curl-auth", repo="o/r",
+             file=f"fixtures/v{i}/PLB-001.md", line=40, redacted="curl ...")
+        for i in range(1, 5)
+    ]
+    collapsed = collapse_duplicates(leaks)
+    assert len(collapsed) == 1
+    assert collapsed[0].extra["locations"] == 4
+    assert "4 locations" in collapsed[0].format_message()
+    # a genuinely different match is NOT merged
+    leaks.append(Leak(tool="gitleaks", rule="curl-auth", repo="o/r",
+                      file="x.md", line=1, redacted="curl OTHER"))
+    assert len(collapse_duplicates(leaks)) == 2
+
+
+def test_collapsed_alert_dedupes_and_persists(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(leaks_mod.notify_mod, "send",
+                        lambda cfg, payload, quiet=False: sent.append(payload) or True)
+    # one repo, the SAME secret matched in three files (the fixtures/v1..v3 case)
+    (tmp_path / "acme__als.gitleaks.json").write_text(json.dumps([
+        {"RuleID": "curl-auth", "File": f"fixtures/v{i}/PLB.md",
+         "StartLine": 40, "Match": "curl -u $KEY:"} for i in range(1, 4)
+    ]))
+    cfg = load_config(None)                     # collapse on by default
+    notifier = LeakNotifier(cfg, str(tmp_path))
+    assert notifier.sweep() == 1                # three matches -> one alert
+    assert len(sent) == 1 and "3 locations" in sent[0]
+    assert LeakNotifier(cfg, str(tmp_path)).sweep() == 0   # persisted dedupe
 
 
 def test_enabled_flag():
