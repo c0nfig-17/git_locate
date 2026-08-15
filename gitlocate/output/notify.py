@@ -151,8 +151,13 @@ def build_command(config) -> Optional[List[str]]:
     return cmd
 
 
-def send(config, payload: str) -> bool:
-    """Pipe ``payload`` into notify. Returns True on success."""
+def send(config, payload: str, quiet: bool = False) -> bool:
+    """Pipe ``payload`` into notify. Returns True on success.
+
+    ``quiet`` lowers the per-send log lines to DEBUG — used by the per-leak
+    notifier, which may call this many times in a row and would otherwise flood
+    the log with one "Sending results to Notify" line per leak.
+    """
     if not payload.strip():
         log.info("Empty Notify payload; nothing to send.")
         return False
@@ -171,7 +176,8 @@ def send(config, payload: str) -> bool:
         log.warning("Skipping Notify send: fix the provider config above, then re-run.")
         return False
 
-    log.info("Sending results to Notify: %s", " ".join(cmd))
+    log.log(logging.DEBUG if quiet else logging.INFO,
+            "Sending results to Notify: %s", " ".join(cmd))
     try:
         proc = subprocess.run(
             cmd,

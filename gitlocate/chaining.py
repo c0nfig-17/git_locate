@@ -29,6 +29,7 @@ import time
 from typing import Dict, List, Optional
 
 from .models import Entity, Findings, KIND_REPO
+from .output import leaks as leaks_mod
 
 log = logging.getLogger("gitlocate.chaining")
 
@@ -99,6 +100,13 @@ class Chainer:
         # "command not found" failures.
         self._avail_cache: Dict[str, bool] = {}
         self._missing_tools: Dict[str, int] = {}
+        # Phase 3: one Notify message per leak, with its location. Off unless
+        # notify.per_leak is set. The notifier no-ops safely if notify itself is
+        # unconfigured, and de-dupes so a per-repo sweep never re-sends.
+        self._leak_notifier = None
+        if leaks_mod.enabled(config):
+            self._leak_notifier = leaks_mod.LeakNotifier(
+                config, self.workdir, dry_run=dry_run)
 
     def _tool_available(self, binary: Optional[str]) -> bool:
         """True if the command's program can be run. Unknown/unparseable -> True
@@ -115,7 +123,8 @@ class Chainer:
         return ok
 
     def run(self, findings: Findings) -> Dict[str, int]:
-        stats = {"repos": 0, "commands_run": 0, "failures": 0, "skipped": 0}
+        stats = {"repos": 0, "commands_run": 0, "failures": 0, "skipped": 0,
+                 "leaks_notified": 0}
         if not self.commands:
             log.info("Chaining enabled but no commands configured; nothing to run.")
             return stats
@@ -178,6 +187,10 @@ class Chainer:
                     stats["commands_run"] += 1
                 else:
                     stats["failures"] += 1
+            # Phase 3: alert on this repo's leaks as soon as its scanners are
+            # done. The seen-set means only leaks new since the last sweep fire.
+            if self._leak_notifier is not None:
+                stats["leaks_notified"] += self._leak_notifier.sweep()
         self._report_missing_tools()
         return stats
 

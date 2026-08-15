@@ -16,11 +16,12 @@ external tools you wire into the [chaining](#tool-chaining) section.
 ## What it does
 
 The three phases of the workflow are: **1) enumeration** (this tool's core),
-**2) leak discovery** (the chaining tools), **3) per-leak notification** (tools
-piping into Notify). **By default a single run does phase 1, fires the Notify
-at the 1→2 boundary, and then runs phase 2** over every discovered repo — no
-extra flags. `--no-chain` / `--no-notify` opt out of the phase-2 and Notify
-steps for a discovery-only run.
+**2) leak discovery** (the chaining tools), **3) per-leak notification** (one
+Notify message per leak, with its location). **By default a single run does
+phase 1, fires the Notify at the 1→2 boundary, runs phase 2** over every
+discovered repo, **and sends a Notify per leak as they are found** — no extra
+flags. `--no-chain` / `--no-notify` opt out of the phase-2 and Notify steps for
+a discovery-only run.
 
 ### Discovery methodology (phase 1)
 
@@ -298,7 +299,8 @@ The workflow has three phases:
 
 1. **Enumeration** — git_locate discovers the orgs/repos/users (this tool).
 2. **Leak discovery** — the [chaining](#tool-chaining) tools scan the repos.
-3. **Per-leak notification** — those tools pipe their findings into `notify`.
+3. **Per-leak notification** — git_locate parses the scanners' output and sends
+   one Notify message *per leak*, with its location.
 
 git_locate fires a **Notify message at the phase 1 → phase 2 boundary**: when
 enumeration finishes and leak discovery is about to start, you get a webhook with
@@ -314,8 +316,30 @@ secrets stay in Notify's own provider-config YAML (pointed to by
 payload in. Choose what to send with `notify.payload`: `phase_transition`
 (default), `summary`, `repos`, or `json`.
 
-For **phase 3**, have your chaining commands pipe each finding into `notify`,
-e.g. `trufflehog git {repo_url} --json | notify -bulk`.
+### Phase 3 — one notification per leak
+
+git_locate reads the scanners' output and sends **one Notify message per leak**,
+each with its location (repo, file, line, commit, detector/rule) — so you get an
+actionable alert as leaks are found, not just the phase-transition summary. It
+understands the two default chaining outputs out of the box:
+
+- **trufflehog** `--json` → `trufflehog.jsonl` (only **verified** findings are
+  sent by default; toggle with `notify.per_leak_verified_only`).
+- **gitleaks** `--report-format json` → `{owner}__{name}.gitleaks.json` (all
+  findings; gitleaks does no live verification).
+
+This is on by default (`notify.per_leak: true`). A persistent seen-set in the
+chaining workdir de-duplicates, so alerts stream per repo during a run and a
+re-run only notifies genuinely new leaks. `notify.per_leak_max_messages` (default
+200, `0` = unlimited) caps how many are sent per run so a noisy repo can't flood
+your channel.
+
+To alert on leaks from a **previous** run's output without re-scanning:
+
+```bash
+gitlocate --notify-leaks            # send per leak from existing chaining output
+gitlocate --notify-leaks --dry-run  # preview the messages without sending
+```
 
 ### The provider config: one block per provider
 
@@ -457,7 +481,8 @@ gitlocate/
 │   └── domain_anchor.py# domain verification
 └── output/
     ├── writer.py       # JSON + flat repos + notify payload
-    └── notify.py       # ProjectDiscovery Notify integration
+    ├── notify.py       # ProjectDiscovery Notify integration
+    └── leaks.py        # phase 3: parse scanner output + per-leak notify
 
 tests/                   # pytest suite (network-free)
 .github/workflows/ci.yml # tests + install.sh lint on every push/PR
