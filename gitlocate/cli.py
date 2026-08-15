@@ -12,6 +12,7 @@ from . import logging_setup
 from .config import load_config
 from .chaining import Chainer
 from .engine import Engine
+from .output import leaks as leaks_mod
 from .output import notify as notify_mod
 from .output import writer
 
@@ -71,6 +72,23 @@ def _check_notify_config(config) -> int:
     return 0
 
 
+def _notify_existing_leaks(config, dry_run: bool) -> int:
+    """--notify-leaks: alert on leaks already on disk, no scanning. 0 on success."""
+    workdir = os.path.abspath(config.get("chaining.workdir", "./output/chaining"))
+    if not os.path.isdir(workdir):
+        log.error("No chaining workdir at %s — run a scan first (phase 2), or set "
+                  "chaining.workdir.", workdir)
+        return 2
+    notifier = leaks_mod.LeakNotifier(config, workdir, dry_run=dry_run)
+    sent = notifier.sweep()
+    if sent:
+        log.info("Sent %d leak notification(s) from %s.", sent, workdir)
+    else:
+        log.info("No new leaks to notify from %s (nothing found, or all already "
+                 "sent).", workdir)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gitlocate",
@@ -112,6 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check-notify-config", action="store_true",
                    help="Validate the Notify provider-config YAML (duplicate "
                         "keys, syntax) and exit.")
+    p.add_argument("--notify-leaks", action="store_true",
+                   help="Send a Notify message per leak from EXISTING chaining "
+                        "output (trufflehog.jsonl + *.gitleaks.json under "
+                        "chaining.workdir), then exit. De-dupes against previous "
+                        "sends, so it is safe to re-run.")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="Increase console log verbosity (-v, -vv).")
     p.add_argument("-q", "--quiet", action="store_true", help="Only log warnings/errors.")
@@ -154,6 +177,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.check_notify_config:
         return _check_notify_config(config)
+
+    if args.notify_leaks:
+        return _notify_existing_leaks(config, args.dry_run)
 
     # -- attach the debug log file + write the diagnostic header ----------
     log_path = None
@@ -248,9 +274,9 @@ def _run_phases(args, config) -> int:
 
     # ======================= PHASE 2: leak discovery =======================
     # Runs the configured external tools (trufflehog, gitleaks, ...) per repo.
-    # On by default (chaining.enabled); --no-chain skips it. Phase 3 (per-leak
-    # notification) is handled by those tools' own configs (e.g. piping their
-    # findings into `notify`).
+    # On by default (chaining.enabled); --no-chain skips it. Phase 3 (one Notify
+    # per leak, with its location) runs inside the chainer as each repo's
+    # scanners finish — see gitlocate/output/leaks.py (notify.per_leak).
     run_chain = bool(config.get("chaining.enabled", False))
     if args.chain:
         run_chain = True
@@ -262,9 +288,10 @@ def _run_phases(args, config) -> int:
         stats = chainer.run(findings)
         verb = "would run" if args.dry_run else "ran"
         suffix = " (dry-run: nothing was executed)" if args.dry_run else ""
-        log.info("Chaining: %d repos, %d commands %s, %d failures, %d skipped%s",
+        log.info("Chaining: %d repos, %d commands %s, %d failures, %d skipped, "
+                 "%d leaks notified%s",
                  stats["repos"], stats["commands_run"], verb, stats["failures"],
-                 stats["skipped"], suffix)
+                 stats["skipped"], stats.get("leaks_notified", 0), suffix)
     else:
         log.info("Phase 2 (leak discovery) skipped (--no-chain or "
                  "chaining.enabled: false).")

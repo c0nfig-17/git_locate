@@ -180,6 +180,13 @@ DEFAULTS: Dict[str, Any] = {
         # Fire a Notify message when enumeration (phase 1) completes and the
         # leak-discovery stage (phase 2) is about to begin.
         "on_phase_transition": True,
+        # Phase 3: one Notify message PER LEAK (with its location) as phase 2
+        # scanners find them. Parses the default trufflehog.jsonl + *.gitleaks.json
+        # under chaining.workdir; de-dupes across sweeps/re-runs.
+        "per_leak": True,
+        "per_leak_verified_only": True,   # trufflehog: only verified findings
+                                          # (gitleaks findings are always sent)
+        "per_leak_max_messages": 200,     # safety cap per run (0 = unlimited)
     },
 }
 

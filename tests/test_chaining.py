@@ -78,7 +78,8 @@ def test_no_commands_configured_is_not_an_error():
     cfg = load_config(None)
     cfg.data["chaining"]["commands"] = []
     stats = Chainer(cfg).run(_one_repo())
-    assert stats == {"repos": 0, "commands_run": 0, "failures": 0, "skipped": 0}
+    assert stats == {"repos": 0, "commands_run": 0, "failures": 0,
+                     "skipped": 0, "leaks_notified": 0}
 
 
 def test_min_confidence_filters_repos():

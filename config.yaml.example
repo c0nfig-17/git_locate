@@ -176,9 +176,13 @@ chaining:
 
 # --------------------------------------------------------------------
 # ProjectDiscovery Notify integration (webhook fan-out).
-# By default a Notify message fires at the PHASE 1 -> PHASE 2 boundary
-# (enumeration done, leak discovery starting). Phase 3 (per-leak alerts) is
-# done by the chaining tools piping their own findings into `notify`.
+# Two kinds of alert, both on by default:
+#   * PHASE 1 -> PHASE 2 boundary summary (on_phase_transition).
+#   * PHASE 3: one message PER LEAK, with its location, as phase 2 scanners
+#     find them (per_leak). git_locate parses the default trufflehog.jsonl and
+#     *.gitleaks.json under chaining.workdir; it de-dupes so re-runs only alert
+#     on new leaks. Send alerts for EXISTING output without re-scanning with:
+#       gitlocate --notify-leaks
 #
 # Webhooks/secrets live in Notify's OWN provider-config YAML, not here. In that
 # file each provider key appears ONCE and holds a LIST of destinations:
@@ -200,3 +204,6 @@ notify:
   provider_id: ""                  # notify -id value, e.g. "recon"
   bulk: true
   payload: phase_transition        # phase_transition | summary | repos | json
+  per_leak: true                   # phase 3: one Notify message per leak found
+  per_leak_verified_only: true     # trufflehog: only VERIFIED (gitleaks: always)
+  per_leak_max_messages: 200       # cap per run so a noisy repo can't flood (0 = off)
